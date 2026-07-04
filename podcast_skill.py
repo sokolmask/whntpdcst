@@ -494,9 +494,25 @@ def build_audio(lines: list[tuple[str, str]], output_path: Path) -> int:
             return 0
 
         print(f"[audio] Склеиваю {len(chunk_paths)} файлов...")
-        success = concatenate_audio(chunk_paths, output_path)
+        concat_path = output_path.with_suffix(".concat.mp3")
+        success = concatenate_audio(chunk_paths, concat_path)
 
-    if success and output_path.exists():
+    if success and concat_path.exists():
+        # Re-encode as CBR 64k so seeking works correctly in all players
+        print("[audio] Перекодирую в CBR 64k...")
+        cmd = [
+            "ffmpeg", "-y", "-i", str(concat_path),
+            "-acodec", "libmp3lame", "-b:a", "64k", "-ar", "22050", "-ac", "1",
+            str(output_path),
+        ]
+        try:
+            subprocess.run(cmd, capture_output=True, timeout=300, check=True)
+            concat_path.unlink(missing_ok=True)
+        except Exception as e:
+            print(f"  [CBR] ошибка перекодирования: {e} — оставляю concat файл")
+            concat_path.rename(output_path)
+
+    if output_path.exists():
         duration = get_audio_duration(output_path)
         size_mb = output_path.stat().st_size / 1_048_576
         print(f"[audio] Готово → {output_path}  ({duration}с, {size_mb:.1f} МБ)")

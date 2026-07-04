@@ -1,0 +1,16 @@
+version: "3.8"
+
+# Static file server for the AI podcast.
+# Serves: /home/sokolmask/podcast-data/ on port 8085 (LAN-only).
+# NPM then proxies whntpdcst.com → localhost:8085.
+
+services:
+  podcast-static:
+    image: nginx:alpine
+    container_name: podcast-static
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8085:80"
+    volumes:
+      - /home/sokolmask/podcast-data:/usr/share/nginx/html:ro
+      - ./nginx-podcast-location.conf:/etc/nginx/conf.d/default.conf:ro

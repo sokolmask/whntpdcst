@@ -1,0 +1,9 @@
+.env
+__pycache__/
+*.pyc
+*.mp3
+*.txt
+episodes/
+feed.xml
+script_*.txt
+.DS_Store

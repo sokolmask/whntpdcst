@@ -1,0 +1,39 @@
+name: Deploy to carbon
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy to carbon via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.CARBON_HOST }}
+          username: sokolmask
+          key: ${{ secrets.CARBON_SSH_KEY }}
+          script: |
+            set -e
+            SKILL_DIR="/home/sokolmask/hermes-data/skills/podcast"
+            PODCAST_DIR="/home/sokolmask/podcast-data"
+
+            # Pull latest code
+            cd "$SKILL_DIR"
+            git pull origin main
+
+            # Sync docker config (nginx.conf may change)
+            cp docker/nginx.conf "$PODCAST_DIR/nginx-podcast-location.conf"
+            cp docker/docker-compose.yml "$PODCAST_DIR/docker-compose.yml"
+
+            # Install/update Python deps
+            /opt/hermes/.venv/bin/pip install -q -r requirements.txt
+
+            # Restart static server if docker config changed
+            cd "$PODCAST_DIR"
+            docker compose restart podcast-static
+
+            echo "Deploy done."

@@ -37,8 +37,8 @@ OPENROUTER_MODEL = "google/gemini-2.5-flash"
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 EDGE_TTS = "/opt/hermes/.venv/bin/edge-tts"
-EPISODES_DIR = Path("/home/sokolmask/podcast-data/episodes")
-RSS_DATA_DIR = Path("/home/sokolmask/podcast-data")
+EPISODES_DIR = Path("/opt/data/podcast/episodes")
+RSS_DATA_DIR = Path("/opt/data/podcast")
 BASE_URL = "https://whntpdcst.com"
 
 VOICE_ALEX = "ru-RU-DmitryNeural"   # Алекс — male

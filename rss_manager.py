@@ -2,7 +2,7 @@
 """
 rss_manager.py — Manages Apple Podcasts-compatible RSS feed for the AI podcast.
 
-Feed location: /home/sokolmask/podcast-data/feed.xml
+Feed location: /opt/data/podcast/feed.xml
 """
 
 import os
@@ -12,7 +12,7 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 from xml.dom import minidom
 
-FEED_PATH = Path("/home/sokolmask/podcast-data/feed.xml")
+FEED_PATH = Path("/opt/data/podcast/feed.xml")
 BASE_URL = "https://whntpdcst.com"
 MAX_EPISODES = 20
 
@@ -228,7 +228,7 @@ if __name__ == "__main__":
     add_episode(
         title=f"Выпуск {ep_num} — тест",
         description="Тестовый эпизод для проверки генерации RSS.",
-        mp3_path="/home/sokolmask/podcast-data/episodes/test.mp3",
+        mp3_path="/opt/data/podcast/episodes/test.mp3",
         duration_seconds=600,
         episode_number=ep_num,
     )

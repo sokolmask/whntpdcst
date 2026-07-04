@@ -1,7 +1,7 @@
 version: "3.8"
 
 # Static file server for the AI podcast.
-# Serves: /home/sokolmask/podcast-data/ on port 8085 (LAN-only).
+# Serves: /home/sokolmask/hermes-data/podcast/ on port 8085 (LAN-only).
 # NPM then proxies whntpdcst.com → localhost:8085.
 
 services:
@@ -12,5 +12,5 @@ services:
     ports:
       - "127.0.0.1:8085:80"
     volumes:
-      - /home/sokolmask/podcast-data:/usr/share/nginx/html:ro
-      - ./nginx-podcast-location.conf:/etc/nginx/conf.d/default.conf:ro
+      - /home/sokolmask/hermes-data/podcast:/usr/share/nginx/html:ro
+      - /home/sokolmask/hermes-data/skills/podcast/docker/nginx.conf:/etc/nginx/conf.d/default.conf:ro

@@ -39,10 +39,10 @@ def _make_empty_feed() -> ET.Element:
     })
     channel = ET.SubElement(rss, "channel")
 
-    def sub(parent, tag, text=None, **attrs):
+    def sub(parent, tag, _text=None, **attrs):
         el = ET.SubElement(parent, tag, attrs)
-        if text is not None:
-            el.text = text
+        if _text is not None:
+            el.text = _text
         return el
 
     sub(channel, "title", FEED_META["title"])
@@ -67,8 +67,8 @@ def _make_empty_feed() -> ET.Element:
 
     image = sub(channel, "itunes:image", href=FEED_META["cover"])
 
-    cat = sub(channel, "itunes:category", text=None, **{"text": FEED_META["category"]})
-    sub(cat, "itunes:category", text=None, **{"text": FEED_META["subcategory"]})
+    cat = ET.SubElement(channel, "itunes:category", {"text": FEED_META["category"]})
+    ET.SubElement(cat, "itunes:category", {"text": FEED_META["subcategory"]})
 
     # Standard image block
     img = sub(channel, "image")
@@ -155,10 +155,10 @@ def add_episode(
     # Build the new <item>
     item = ET.Element("item")
 
-    def sub(parent, tag, text=None, **attrs):
+    def sub(parent, tag, _text=None, **attrs):
         el = ET.SubElement(parent, tag, attrs)
-        if text is not None:
-            el.text = text
+        if _text is not None:
+            el.text = _text
         return el
 
     sub(item, "title", title)

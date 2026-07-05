@@ -887,18 +887,25 @@ def main():
     sources = yt_sources + web_sources
     print(f"[context] Всего символов: {len(context)}, источников: {len(sources)}, новых материалов: {len(new_items)}")
 
+    # Output stem: never overwrite same-day artifacts (published episode/digest
+    # already reference them, and Cloudflare caches mp3 for 24h)
+    stem = today
+    if (EPISODES_DIR / f"{today}.mp3").exists() or (DIGESTS_DIR / f"{today}.md").exists():
+        stem = f"{today}-{datetime.now().strftime('%H%M')}"
+        print(f"[out] Артефакты за {today} уже есть → пишу как {stem}.*")
+
     # 4. Stage 1: digest
     digest = generate_digest(context, today)
     if sources:
         digest += "\n\n## Источники выпуска\n" + "\n".join(f"- {s}" for s in sources)
 
     DIGESTS_DIR.mkdir(parents=True, exist_ok=True)
-    digest_path = DIGESTS_DIR / f"{today}.md"
+    digest_path = DIGESTS_DIR / f"{stem}.md"
     digest_path.write_text(digest, encoding="utf-8")
     print(f"[digest] Сохранён → {digest_path}")
 
     try:
-        html_path = DIGESTS_DIR / f"{today}.html"
+        html_path = DIGESTS_DIR / f"{stem}.html"
         render_digest_html(digest, html_path, f"Что нового в AI — {today}")
         print(f"[digest] HTML → {html_path}")
     except Exception as e:
@@ -908,7 +915,7 @@ def main():
     script = generate_script(digest)
 
     # Save script for debugging
-    script_path = DATA_DIR / f"script_{today}.txt"
+    script_path = DATA_DIR / f"script_{stem}.txt"
     script_path.parent.mkdir(parents=True, exist_ok=True)
     script_path.write_text(script, encoding="utf-8")
     print(f"[script] Сохранён → {script_path}")
@@ -931,10 +938,7 @@ def main():
     print(f"[parse] {len(lines)} реплик")
 
     # 7. Build audio: Gemini multi-speaker, fallback edge-tts
-    # Never overwrite an existing file (same-day regen + published episode + CF cache)
-    mp3_path = EPISODES_DIR / f"{today}.mp3"
-    if mp3_path.exists():
-        mp3_path = EPISODES_DIR / f"{today}-{datetime.now().strftime('%H%M')}.mp3"
+    mp3_path = EPISODES_DIR / f"{stem}.mp3"
     if GEMINI_API_KEY:
         duration_sec = build_audio_gemini(lines, mp3_path)
         if duration_sec == 0:
@@ -956,7 +960,7 @@ def main():
         f"Еженедельный обзор AI новостей за неделю от {today}. "
         f"Алекс и Саша обсуждают ключевые события в мире искусственного интеллекта. "
         f"Выпуск полностью сгенерирован AI: дайджест, сценарий и голоса. "
-        f"Текстовый дайджест выпуска: {BASE_URL}/digests/{today}.html. "
+        f"Текстовый дайджест выпуска: {BASE_URL}/digests/{stem}.html. "
         f"Источники: {', '.join(sources) if sources else 'YouTube, HackerNews, HuggingFace Papers'}."
     )
     manifest = {
@@ -991,7 +995,7 @@ def main():
     print(f"\n=== Готово ===")
     print(f"MP3:     {mp3_path}")
     print(f"URL:     {BASE_URL}/episodes/{mp3_path.name}")
-    print(f"Дайджест: {BASE_URL}/digests/{today}.html")
+    print(f"Дайджест: {BASE_URL}/digests/{stem}.html")
     print(f"RSS:     {BASE_URL}/feed.xml")
     duration_min = duration_sec // 60
     print(f"Длительность: ~{duration_min} мин")

@@ -638,9 +638,10 @@ def call_llm(prompt: str, temperature: float, max_tokens: int = 4096) -> str:
 
 def generate_digest(context: str, date: str) -> str:
     """Stage 1: raw materials → structured Markdown digest."""
-    # Truncate context to ~50000 chars
-    if len(context) > 50000:
-        context = context[:50000] + "\n\n[... материалы обрезаны ...]"
+    # Truncate context (~40k tokens for Gemini Flash; TG sources come last,
+    # so a low cap would silently drop them)
+    if len(context) > 150000:
+        context = context[:150000] + "\n\n[... материалы обрезаны ...]"
 
     print(f"[LLM] Генерирую дайджест ({len(context)} символов контекста)...")
     digest = call_llm(DIGEST_PROMPT.format(date=date, context=context), temperature=0.4)

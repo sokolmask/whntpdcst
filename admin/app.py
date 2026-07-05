@@ -32,7 +32,17 @@ import rss_manager as rm
 
 EPISODES_DIR = Path("/opt/data/podcast/episodes")
 DIGESTS_DIR = Path("/opt/data/podcast/digests")
+ACCESS_LOG = Path("/opt/data/podcast/logs/episodes.log")
 ITUNES = "{" + rm.ITUNES_NS + "}"
+
+# nginx "main" log format:
+# $remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent
+# "$http_referer" "$http_user_agent" "$http_x_forwarded_for"
+LOG_LINE_RE = re.compile(
+    r'^(?P<ip>\S+) \S+ \S+ \[[^\]]+\] '
+    r'"(?:GET|HEAD) (?P<path>/episodes/[^" ?]+)[^"]*" '
+    r'(?P<status>\d+) \d+ "[^"]*" "[^"]*" "(?P<xff>[^"]*)"'
+)
 
 security = HTTPBasic()
 
@@ -70,6 +80,23 @@ def _published() -> list[dict]:
             "number": it.findtext(ITUNES + "episode") or "?",
         })
     return eps
+
+
+def _episode_analytics() -> dict[str, dict]:
+    """Parse the persisted nginx access log into per-file request/listener stats."""
+    stats: dict[str, dict] = {}
+    if not ACCESS_LOG.exists():
+        return stats
+    for line in ACCESS_LOG.read_text(encoding="utf-8", errors="replace").splitlines():
+        m = LOG_LINE_RE.match(line)
+        if not m or not m.group("status").startswith(("2", "3")):
+            continue
+        filename = m.group("path").rsplit("/", 1)[-1]
+        ip = m.group("xff") or m.group("ip")
+        s = stats.setdefault(filename, {"requests": 0, "ips": set()})
+        s["requests"] += 1
+        s["ips"].add(ip)
+    return stats
 
 
 def _find_item(channel, url: str):
@@ -139,6 +166,8 @@ PAGE = """<!DOCTYPE html>
 Artist: {author} · метаданные канала правятся в rss_manager.py</p>
 {flash}
 <h2>Опубликованные эпизоды</h2>
+<p class="muted">Запросов/IP — из логов nginx, приблизительно (плееры качают эпизод по частям,
+одно прослушивание может дать несколько запросов)</p>
 {episodes}
 <h2>Файлы вне фида</h2>
 {files}
@@ -163,10 +192,12 @@ Artist: {author} · метаданные канала правятся в rss_ma
 def _render(flash: str = "") -> str:
     eps = _published()
     published_files = {e["file"] for e in eps}
+    analytics = _episode_analytics()
 
     rows = []
     for e in eps:
         t, d, u = html.escape(e["title"]), html.escape(e["description"]), html.escape(e["url"])
+        a = analytics.get(e["file"], {"requests": 0, "ips": set()})
         rows.append(f"""<tr>
 <td>{e['number']}</td>
 <td><a href="{u}">{t}</a><br>
@@ -179,13 +210,16 @@ def _render(flash: str = "") -> str:
 </form></details></td>
 <td>{e['date']}</td>
 <td>{_fmt_dur(e['duration'])}</td>
+<td>{a['requests']}</td>
+<td>{len(a['ips'])}</td>
 <td><form class="inline" method="post" action="/unpublish"
      onsubmit="return confirm('Снять «{t}» с публикации? Файл останется.')">
 <input type="hidden" name="url" value="{u}">
 <button class="danger" type="submit">Снять</button></form></td>
 </tr>""")
     episodes_html = (
-        "<table><tr><th>№</th><th>Эпизод</th><th>Дата</th><th>Длит.</th><th></th></tr>"
+        "<table><tr><th>№</th><th>Эпизод</th><th>Дата</th><th>Длит.</th>"
+        "<th>Запросов</th><th>IP</th><th></th></tr>"
         + "".join(rows) + "</table>" if rows else "<p class='muted'>Фид пуст.</p>"
     )
 

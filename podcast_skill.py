@@ -138,43 +138,48 @@ def yt_get(client: httpx.Client, endpoint: str, **params) -> dict:
     return resp.json()
 
 
-def resolve_channel_id(client: httpx.Client, handle: str) -> str | None:
-    """Resolve @handle to channel ID."""
+def resolve_uploads_playlist(client: httpx.Client, handle: str) -> str | None:
+    """Resolve @handle to the channel's uploads playlist ID (1 quota unit)."""
     try:
-        data = yt_get(client, "channels", part="id", forHandle=handle.lstrip("@"))
+        data = yt_get(client, "channels", part="contentDetails", forHandle=handle.lstrip("@"))
         items = data.get("items", [])
-        return items[0]["id"] if items else None
+        if not items:
+            return None
+        return items[0]["contentDetails"]["relatedPlaylists"]["uploads"]
     except Exception as e:
         print(f"  [YT] resolve {handle}: {e}")
         return None
 
 
-def get_recent_videos(client: httpx.Client, channel_id: str, days_back: int, max_results: int = 3) -> list[dict]:
-    """Get recent videos from a channel."""
-    published_after = (
+def get_recent_videos(client: httpx.Client, playlist_id: str, days_back: int, max_results: int = 3) -> list[dict]:
+    """Get recent videos from the uploads playlist (1 quota unit vs 100 for search)."""
+    cutoff = (
         datetime.now(timezone.utc) - timedelta(days=days_back)
     ).strftime("%Y-%m-%dT%H:%M:%SZ")
     try:
         data = yt_get(
-            client, "search",
-            part="id,snippet",
-            channelId=channel_id,
-            publishedAfter=published_after,
-            order="date",
-            maxResults=max_results,
-            type="video",
+            client, "playlistItems",
+            part="snippet,contentDetails",
+            playlistId=playlist_id,
+            maxResults=10,
         )
-        return [
-            {
-                "id": item["id"]["videoId"],
-                "title": item["snippet"]["title"],
-                "published": item["snippet"]["publishedAt"][:10],
-                "description": item["snippet"]["description"][:300],
-            }
-            for item in data.get("items", [])
-        ]
+        videos = []
+        for item in data.get("items", []):
+            snippet = item["snippet"]
+            published = item["contentDetails"].get("videoPublishedAt") or snippet["publishedAt"]
+            if published < cutoff:
+                continue
+            videos.append({
+                "id": item["contentDetails"]["videoId"],
+                "title": snippet["title"],
+                "published": published[:10],
+                "description": snippet["description"][:300],
+            })
+            if len(videos) >= max_results:
+                break
+        return videos
     except Exception as e:
-        print(f"  [YT] get videos for {channel_id}: {e}")
+        print(f"  [YT] get videos for playlist {playlist_id}: {e}")
         return []
 
 
@@ -218,12 +223,12 @@ def fetch_youtube_context(days_back: int) -> tuple[str, list[str]]:
     for i, (handle, category) in enumerate(CHANNELS, 1):
         print(f"[YT {i}/{len(CHANNELS)}] {handle} ({category})", end="", flush=True)
         try:
-            channel_id = resolve_channel_id(client, handle)
-            if not channel_id:
+            playlist_id = resolve_uploads_playlist(client, handle)
+            if not playlist_id:
                 print(" — не найден")
                 continue
 
-            videos = get_recent_videos(client, channel_id, days_back, max_results=2)
+            videos = get_recent_videos(client, playlist_id, days_back, max_results=2)
             if not videos:
                 print(" — нет видео")
                 continue

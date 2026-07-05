@@ -18,8 +18,17 @@ MAX_EPISODES = 20
 
 FEED_META = {
     "title": "Что нового в AI",
-    "description": "Еженедельный подкаст об искусственном интеллекте, ML и технологиях",
-    "author": "Алекс & Саша",
+    "description": (
+        "Еженедельный подкаст об искусственном интеллекте, ML и технологиях. "
+        "Идея — голосовой и текстовый дайджест для тех, кто хочет оставаться в курсе "
+        "AI-новостей без чтения бесконечных лент и просмотра видео. Источники я выбрал "
+        "для личного пользования, и дайджест собирается так, чтобы быть интересным "
+        "в первую очередь мне самому — но среди друзей и коллег оказался запрос на такое, "
+        "поэтому выпускаю в виде подкаста. Каждый выпуск полностью генерируется AI: "
+        "дайджест, сценарий и голоса ведущих Алекса и Саши."
+    ),
+    "subtitle": "Еженедельный AI-дайджест голосом и текстом — без бесконечных лент и видео",
+    "author": "Sergei Sokolov",
     "email": "podcast@whntpdcst.com",
     "language": "ru",
     "cover": f"{BASE_URL}/cover.jpg",
@@ -56,7 +65,7 @@ def _make_empty_feed() -> ET.Element:
 
     # iTunes tags
     sub(channel, "itunes:author", FEED_META["author"])
-    sub(channel, "itunes:subtitle", FEED_META["description"])
+    sub(channel, "itunes:subtitle", FEED_META["subtitle"])
     sub(channel, "itunes:summary", FEED_META["description"])
     sub(channel, "itunes:explicit", "no")
     sub(channel, "itunes:type", "episodic")
@@ -111,6 +120,34 @@ def _parse_feed() -> tuple[ET.Element, ET.Element]:
     return rss, rss.find("channel")
 
 
+ITUNES_NS = "http://www.itunes.com/dtds/podcast-1.0.dtd"
+
+
+def _sync_channel_meta(channel: ET.Element) -> None:
+    """Refresh channel-level metadata from FEED_META (feed may predate config changes)."""
+    def set_text(parent, tag, value):
+        # accept both Clark ({ns}tag) and prefixed (itunes:tag) forms
+        alt = tag.replace(f"{{{ITUNES_NS}}}", "itunes:")
+        for child in parent:
+            if child.tag in (tag, alt):
+                child.text = value
+                return
+        ET.SubElement(parent, tag).text = value
+
+    it = f"{{{ITUNES_NS}}}"
+    set_text(channel, "title", FEED_META["title"])
+    set_text(channel, "description", FEED_META["description"])
+    set_text(channel, "copyright", f"© {datetime.now().year} {FEED_META['author']}")
+    set_text(channel, f"{it}author", FEED_META["author"])
+    set_text(channel, f"{it}subtitle", FEED_META["subtitle"])
+    set_text(channel, f"{it}summary", FEED_META["description"])
+    owner = next(
+        (c for c in channel if c.tag in (f"{it}owner", "itunes:owner")), None
+    )
+    if owner is not None:
+        set_text(owner, f"{it}name", FEED_META["author"])
+
+
 def _get_existing_items(channel: ET.Element) -> list[ET.Element]:
     return channel.findall("item")
 
@@ -150,6 +187,7 @@ def add_episode(
     pub_date = formatdate(usegmt=True)
 
     rss, channel = _parse_feed()
+    _sync_channel_meta(channel)
     existing_items = _get_existing_items(channel)
 
     # Build the new <item>

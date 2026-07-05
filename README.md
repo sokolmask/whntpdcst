@@ -58,6 +58,16 @@ OPENROUTER_API_KEY=...
 podcast_skill.py   # основной pipeline
 sources.yaml       # источники (YouTube каналы, HN, HF) — правь и пушь
 rss_manager.py     # Apple Podcasts-совместимый RSS
-docker/            # nginx static server (порт 8085)
+admin/app.py       # админка (FastAPI)
+docker/            # nginx static server (8085) + админка (8086)
 setup-carbon.sh    # one-time setup на сервере
 ```
+
+## Админка
+
+`http://carbon:8086` (LAN-only, не выходит в Cloudflare Tunnel). HTTP Basic:
+`ADMIN_USER`/`ADMIN_PASSWORD` из env Hermes.
+
+Умеет: снять эпизод с публикации / вернуть, править название и описание,
+загрузить свою запись (любой аудиоформат → CBR 64k MP3) и опубликовать,
+удалить файл, ссылки на дайджесты.

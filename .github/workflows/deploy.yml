@@ -31,8 +31,8 @@ jobs:
             # Install/update Python deps via uv
             docker exec hermes uv pip install -q -r /opt/data/skills/podcast/requirements.txt || true
 
-            # Restart static server if docker config changed
+            # Apply docker config changes (static server + admin panel)
             cd "$SKILL_DIR/docker"
-            docker compose restart podcast-static
+            docker compose up -d --build
 
             echo "Deploy done."

@@ -13,6 +13,7 @@ Features:
 """
 
 import html
+import json
 import os
 import re
 import secrets
@@ -23,17 +24,25 @@ from datetime import datetime
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Form, HTTPException, UploadFile
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from mutagen.mp3 import MP3
 
 sys.path.insert(0, "/opt/data/skills/podcast")
 import rss_manager as rm
 
+SKILL_DIR = Path("/opt/data/skills/podcast")
 EPISODES_DIR = Path("/opt/data/podcast/episodes")
 DIGESTS_DIR = Path("/opt/data/podcast/digests")
 ACCESS_LOG = Path("/opt/data/podcast/logs/episodes.log")
+SOURCES_PATH = SKILL_DIR / "sources.yaml"
+EXTRA_SOURCES_PATH = Path("/opt/data/podcast/sources.extra.yaml")
+COVERED_PATH = Path("/opt/data/podcast/covered.json")
+GEN_LOG = Path("/opt/data/podcast/logs/generate.log")
 ITUNES = "{" + rm.ITUNES_NS + "}"
+
+# Single uvicorn worker → a module global is enough to track the one allowed run
+_gen_proc: subprocess.Popen | None = None
 
 # nginx "main" log format:
 # $remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent
@@ -128,6 +137,47 @@ def _fmt_size(num_bytes: int) -> str:
     return f"{num_bytes / 1_048_576:.1f} МБ"
 
 
+def _manifest_for(mp3_path: Path) -> dict:
+    """Load the generation manifest ({stem}.items.json) for an episode file."""
+    mpath = mp3_path.with_name(mp3_path.stem + ".items.json")
+    if mpath.exists():
+        try:
+            return json.loads(mpath.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+
+def _merge_covered(mp3_path: Path) -> int:
+    """On publish: merge the episode manifest's items into covered.json."""
+    manifest = _manifest_for(mp3_path)
+    items = manifest.get("items", {})
+    if not items:
+        return 0
+    covered = {}
+    if COVERED_PATH.exists():
+        try:
+            covered = json.loads(COVERED_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            covered = {}
+    date = manifest.get("date", datetime.now().strftime("%Y-%m-%d"))
+    for item_id, title in items.items():
+        covered[item_id] = {"episode": date, "title": title}
+    COVERED_PATH.write_text(json.dumps(covered, ensure_ascii=False, indent=1), encoding="utf-8")
+    return len(items)
+
+
+def _gen_running() -> bool:
+    return _gen_proc is not None and _gen_proc.poll() is None
+
+
+def _gen_log_tail(n: int = 20) -> str:
+    if not GEN_LOG.exists():
+        return ""
+    lines = GEN_LOG.read_text(encoding="utf-8", errors="replace").splitlines()
+    return "\n".join(lines[-n:])
+
+
 # ── Views ─────────────────────────────────────────────────────────────────────
 
 PAGE = """<!DOCTYPE html>
@@ -135,6 +185,7 @@ PAGE = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+{refresh}
 <title>Админка — Что нового в AI</title>
 <style>
   body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -152,11 +203,16 @@ PAGE = """<!DOCTYPE html>
   form.inline {{ display: inline; }}
   details {{ margin: .3rem 0; }}
   .muted {{ color: #888; font-size: .85rem; }}
+  pre.log {{ background: #f0f0ec; padding: .6rem; border-radius: 6px; font-size: .78rem;
+        overflow-x: auto; white-space: pre-wrap; }}
+  audio {{ width: 100%; max-width: 24rem; display: block; margin-top: .3rem; }}
+  textarea.yaml {{ font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .8rem; }}
   @media (prefers-color-scheme: dark) {{
     body {{ color: #e8e8e8; background: #16161e; }}
     h2 {{ border-color: #333; }}
     td, th {{ border-color: #2a2a35; }}
     input[type=text], textarea, button {{ background: #22222e; color: #e8e8e8; border-color: #444; }}
+    pre.log {{ background: #1e1e28; }}
   }}
 </style>
 </head>
@@ -171,6 +227,10 @@ Artist: {author} · метаданные канала правятся в rss_ma
 {episodes}
 <h2>Файлы вне фида</h2>
 {files}
+<h2>Генерация выпуска</h2>
+{generation}
+<h2>Источники</h2>
+{sources}
 <h2>Загрузить запись</h2>
 <form method="post" action="/upload" enctype="multipart/form-data">
 <table>
@@ -228,14 +288,19 @@ def _render(flash: str = "") -> str:
         if p.name in published_files:
             continue
         n = html.escape(p.name)
+        manifest = _manifest_for(p)
+        title_val = html.escape(manifest.get("title", ""))
+        desc_val = html.escape(manifest.get("description", ""))
         file_rows.append(f"""<tr>
-<td>{n}</td><td>{_fmt_size(p.stat().st_size)}</td><td>{_fmt_dur(_mp3_duration(p))}</td>
+<td>{n}
+<audio controls preload="none" src="/audio/{n}"></audio></td>
+<td>{_fmt_size(p.stat().st_size)}</td><td>{_fmt_dur(_mp3_duration(p))}</td>
 <td>
 <details><summary>Опубликовать</summary>
 <form method="post" action="/publish">
 <input type="hidden" name="filename" value="{n}">
-<input type="text" name="title" placeholder="Название" required>
-<textarea name="description" rows="3" placeholder="Описание" required></textarea>
+<input type="text" name="title" placeholder="Название" value="{title_val}" required>
+<textarea name="description" rows="3" placeholder="Описание" required>{desc_val}</textarea>
 <button type="submit">В фид</button>
 </form></details>
 <form class="inline" method="post" action="/delete-file"
@@ -249,6 +314,62 @@ def _render(flash: str = "") -> str:
         if file_rows else "<p class='muted'>Все файлы опубликованы.</p>"
     )
 
+    # Generation section
+    running = _gen_running()
+    tail = html.escape(_gen_log_tail())
+    if running:
+        generation_html = (
+            "<p>⏳ Идёт генерация — страница обновляется каждые 5 секунд.</p>"
+            f"<pre class='log'>{tail}</pre>"
+        )
+    else:
+        status = ""
+        if _gen_proc is not None:
+            rc = _gen_proc.returncode
+            status = ("<p>✅ Последняя генерация завершилась — файл в «Файлы вне фида», "
+                      "послушай и опубликуй.</p>" if rc == 0
+                      else f"<p>❌ Последняя генерация упала (код {rc}) — смотри лог.</p>")
+        log_details = (f"<details><summary class='muted'>лог последней генерации</summary>"
+                       f"<pre class='log'>{tail}</pre></details>") if tail else ""
+        generation_html = f"""{status}
+<form method="post" action="/generate">
+Материалы за <input type="text" name="days" value="7" size="3" style="width:3rem"> дней
+<button type="submit">Сгенерировать выпуск</button>
+<span class="muted">дайджест + сценарий + озвучка, ~5-10 минут; без публикации в фид</span>
+</form>
+{log_details}"""
+
+    # Sources section
+    default_yaml = html.escape(
+        SOURCES_PATH.read_text(encoding="utf-8") if SOURCES_PATH.exists()
+        else "# sources.yaml не найден"
+    )
+    extra_yaml = html.escape(
+        EXTRA_SOURCES_PATH.read_text(encoding="utf-8") if EXTRA_SOURCES_PATH.exists() else ""
+    )
+    covered_count = 0
+    if COVERED_PATH.exists():
+        try:
+            covered_count = len(json.loads(COVERED_PATH.read_text(encoding="utf-8")))
+        except Exception:
+            pass
+    sources_html = f"""<details><summary>Дефолтные (sources.yaml из репо, {default_yaml.count("handle:")} каналов) —
+развернуть и скопировать</summary>
+<textarea class="yaml" rows="14" readonly onclick="this.select()">{default_yaml}</textarea>
+<p class="muted">Правится в репо: sources.yaml → git push (+ ручной деплой)</p></details>
+<form method="post" action="/sources-extra">
+<p>Дополнительные источники (поверх дефолтных, живут на сервере, репо не трогают):</p>
+<textarea class="yaml" name="content" rows="8" placeholder="youtube:
+  channels:
+    - {{handle: &quot;@SomeChannel&quot;, category: &quot;AI&quot;}}
+hackernews:
+  queries: [&quot;extra query&quot;]">{extra_yaml}</textarea>
+<button type="submit">Сохранить</button>
+<span class="muted">пустое поле = убрать дополнительные</span>
+</form>
+<p class="muted">В базе освещённого: {covered_count} материалов (covered.json) —
+уже попавшее в опубликованные выпуски в новых только упоминается одной фразой.</p>"""
+
     digest_links = [
         f'<li>{p.stem}: <a href="{rm.BASE_URL}/digests/{p.stem}.html">HTML</a> · '
         f'<a href="{rm.BASE_URL}/digests/{p.stem}.md">MD</a></li>'
@@ -259,11 +380,14 @@ def _render(flash: str = "") -> str:
     next_num = rm.get_next_episode_number()
     today = datetime.now().strftime("%Y-%m-%d")
     return PAGE.format(
+        refresh='<meta http-equiv="refresh" content="5">' if running else "",
         base_url=rm.BASE_URL,
         author=html.escape(rm.FEED_META["author"]),
         flash=f"<p><b>{html.escape(flash)}</b></p>" if flash else "",
         episodes=episodes_html,
         files=files_html,
+        generation=generation_html,
+        sources=sources_html,
         next_title=f"Выпуск {next_num} — {today}",
         digests=digests_html,
     )
@@ -322,7 +446,52 @@ def publish(filename: str = Form(...), title: str = Form(...), description: str 
         duration_seconds=_mp3_duration(path),
         episode_number=rm.get_next_episode_number(),
     )
-    return _redirect(f"Опубликован: {title}")
+    n_covered = _merge_covered(path)
+    extra = f" (+{n_covered} материалов в базу освещённого)" if n_covered else ""
+    return _redirect(f"Опубликован: {title}{extra}")
+
+
+@app.get("/audio/{filename}")
+def audio(filename: str):
+    path = _safe_episode_path(filename)
+    if not path.exists():
+        raise HTTPException(404, f"Файл не найден: {filename}")
+    return FileResponse(path, media_type="audio/mpeg")
+
+
+@app.post("/generate")
+def generate(days: str = Form("7")):
+    global _gen_proc
+    if _gen_running():
+        return _redirect("Генерация уже идёт")
+    try:
+        days_n = max(1, min(int(days), 31))
+    except ValueError:
+        return _redirect(f"Некорректное число дней: {days}")
+    GEN_LOG.parent.mkdir(parents=True, exist_ok=True)
+    with GEN_LOG.open("w", encoding="utf-8") as log_f:
+        _gen_proc = subprocess.Popen(
+            [sys.executable, "-u", str(SKILL_DIR / "podcast_skill.py"),
+             "--days", str(days_n), "--no-publish"],
+            stdout=log_f, stderr=subprocess.STDOUT, cwd=str(SKILL_DIR),
+        )
+    return _redirect(f"Генерация запущена (материалы за {days_n} дней)")
+
+
+@app.post("/sources-extra")
+def sources_extra(content: str = Form("")):
+    import yaml
+    if not content.strip():
+        EXTRA_SOURCES_PATH.unlink(missing_ok=True)
+        return _redirect("Дополнительные источники убраны")
+    try:
+        data = yaml.safe_load(content)
+        if not isinstance(data, dict):
+            raise ValueError("ожидается YAML-словарь (youtube:/hackernews:)")
+    except Exception as e:
+        return _redirect(f"НЕ сохранено, ошибка YAML: {e}")
+    EXTRA_SOURCES_PATH.write_text(content, encoding="utf-8")
+    return _redirect("Дополнительные источники сохранены")
 
 
 @app.post("/upload")
@@ -374,4 +543,5 @@ def delete_file(filename: str = Form(...)):
     if filename in {e["file"] for e in _published()}:
         raise HTTPException(400, "Файл опубликован — сначала сними с публикации")
     path.unlink()
+    path.with_name(path.stem + ".items.json").unlink(missing_ok=True)
     return _redirect(f"Удалён: {filename}")

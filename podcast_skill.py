@@ -59,14 +59,58 @@ GEMINI_VOICE_SASHA = "Leda"    # female
 SILENCE_BETWEEN_SPEAKERS_SEC = 0.3
 
 SOURCES_PATH = Path(os.environ.get("PODCAST_SOURCES", Path(__file__).parent / "sources.yaml"))
+EXTRA_SOURCES_PATH = DATA_DIR / "sources.extra.yaml"   # user additions from admin panel
+COVERED_PATH = DATA_DIR / "covered.json"               # items already covered in published episodes
 
 
 def load_sources() -> dict:
-    """Load source configuration from sources.yaml."""
+    """Load sources.yaml, merged with user additions from sources.extra.yaml."""
     import yaml
     if not SOURCES_PATH.exists():
         sys.exit(f"ОШИБКА: конфиг источников не найден: {SOURCES_PATH}")
-    return yaml.safe_load(SOURCES_PATH.read_text(encoding="utf-8")) or {}
+    cfg = yaml.safe_load(SOURCES_PATH.read_text(encoding="utf-8")) or {}
+    if EXTRA_SOURCES_PATH.exists():
+        try:
+            extra = yaml.safe_load(EXTRA_SOURCES_PATH.read_text(encoding="utf-8")) or {}
+        except Exception as e:
+            print(f"[sources] sources.extra.yaml не распарсился, игнорирую: {e}")
+            extra = {}
+        channels = cfg.setdefault("youtube", {}).setdefault("channels", [])
+        known = {c.get("handle", "").lower() for c in channels}
+        added = 0
+        for c in extra.get("youtube", {}).get("channels", []):
+            if c.get("handle") and c["handle"].lower() not in known:
+                channels.append(c)
+                added += 1
+        queries = cfg.setdefault("hackernews", {}).setdefault("queries", [])
+        for q in extra.get("hackernews", {}).get("queries", []):
+            if q not in queries:
+                queries.append(q)
+                added += 1
+        if added:
+            print(f"[sources] +{added} доп. источников из sources.extra.yaml")
+    return cfg
+
+
+def load_covered() -> dict:
+    """Load {item_id: {"episode": date, "title": ...}} of already-covered items."""
+    if COVERED_PATH.exists():
+        try:
+            return json.loads(COVERED_PATH.read_text(encoding="utf-8"))
+        except Exception as e:
+            print(f"[covered] covered.json не читается, начинаю с пустого: {e}")
+    return {}
+
+
+def mark_covered(items: dict[str, str], episode_date: str) -> None:
+    """Record items as covered by the episode published on episode_date."""
+    covered = load_covered()
+    for item_id, title in items.items():
+        covered[item_id] = {"episode": episode_date, "title": title}
+    COVERED_PATH.write_text(
+        json.dumps(covered, ensure_ascii=False, indent=1), encoding="utf-8"
+    )
+    print(f"[covered] +{len(items)} материалов → {COVERED_PATH} (всего {len(covered)})")
 
 DIGEST_PROMPT = """Ты — редактор еженедельного дайджеста «Что нового в AI».
 
@@ -82,6 +126,8 @@ DIGEST_PROMPT = """Ты — редактор еженедельного дайд
 - Раздел «## Коротко» в конце — остальные заметные новости, по одной строке
 - Пиши плотно и фактурно, без воды, вступлений и выводов «в целом неделя показала»
 - Английские названия продуктов, моделей и компаний оставляй латиницей как есть
+- Темы из раздела «Уже освещалось в прошлых выпусках» заново НЕ разбирай — максимум \
+короткая отсылка «об этом говорили в выпуске от ...» внутри связанной новой темы
 
 Материалы этой недели:
 {context}"""
@@ -94,10 +140,11 @@ SCRIPT_PROMPT = """Ты пишешь сценарий для подкаста «
 Стиль: как NotebookLM Audio Overview — живой, естественный разговор, не лекция. Ведущие перебивают друг друга, \
 уточняют, иногда удивляются. Без формальных переходов типа «теперь поговорим о...».
 
-На основе дайджеста ниже напиши эпизод подкаста (~8-12 минут, примерно 1500-2000 слов диалога) на русском языке.
+На основе дайджеста ниже напиши эпизод подкаста ({length_hint}) на русском языке.
 
 Правила:
-- Охвати 5-8 самых интересных тем дайджеста
+- Охвати {topics_hint}
+- Если ведущие ссылаются на тему прошлого выпуска — одной фразой, не пересказывая её
 - По каждой теме: что произошло → почему важно → что это значит для людей/разработчиков
 - Только живой разговор — никаких списков, никаких буллетов в репликах
 - Начинай сразу с темы — без «добро пожаловать», без «сегодня мы поговорим»
@@ -237,9 +284,17 @@ def get_transcript(video_id: str, max_chars: int = 5000) -> str | None:
     return None
 
 
-def fetch_youtube_context(days_back: int, channels: list[tuple[str, str]]) -> tuple[str, list[str]]:
+def fetch_youtube_context(
+    days_back: int,
+    channels: list[tuple[str, str]],
+    covered: dict,
+    new_items: dict[str, str],
+    old_mentions: list[str],
+) -> tuple[str, list[str]]:
     """Fetch transcripts from configured channels.
 
+    Skips videos already covered in published episodes (adds them to
+    old_mentions instead); records fresh video ids into new_items.
     Returns (formatted context string, list of sources that had videos).
     """
     if not YOUTUBE_API_KEY:
@@ -262,14 +317,27 @@ def fetch_youtube_context(days_back: int, channels: list[tuple[str, str]]) -> tu
                 continue
 
             videos = get_recent_videos(client, playlist_id, days_back, max_results=2)
+            fresh = []
+            for v in videos:
+                key = f"yt:{v['id']}"
+                if key in covered:
+                    old_mentions.append(
+                        f"{v['title']} ({handle}) — выпуск от {covered[key].get('episode', '?')}"
+                    )
+                else:
+                    fresh.append(v)
             if not videos:
                 print(" — нет видео")
                 continue
+            if not fresh:
+                print(" — всё уже освещалось")
+                continue
 
-            print(f" — {len(videos)} видео", end="", flush=True)
+            print(f" — {len(fresh)} видео", end="", flush=True)
 
             channel_parts = [f"\n## YouTube: {handle} ({category})\n"]
-            for v in videos:
+            for v in fresh:
+                new_items[f"yt:{v['id']}"] = v["title"]
                 channel_parts.append(
                     f"Видео: {v['title']} ({v['published']}) https://youtube.com/watch?v={v['id']}"
                 )
@@ -296,10 +364,18 @@ def fetch_youtube_context(days_back: int, channels: list[tuple[str, str]]) -> tu
 
 # ── Web sources ───────────────────────────────────────────────────────────────
 
-def fetch_hn_ai(queries: list[str], min_points: int = 30, max_items: int = 10) -> str:
+def fetch_hn_ai(
+    queries: list[str],
+    min_points: int = 30,
+    max_items: int = 10,
+    covered: dict | None = None,
+    new_items: dict[str, str] | None = None,
+    old_mentions: list[str] | None = None,
+) -> str:
     """Fetch top AI stories from HackerNews RSS."""
     parts = []
     seen = set()
+    covered = covered or {}
 
     try:
         client = httpx.Client()
@@ -313,9 +389,17 @@ def fetch_hn_ai(queries: list[str], min_points: int = 30, max_items: int = 10) -
                     continue
                 seen.add(link)
                 title = entry.get("title", "")
+                if f"hn:{link}" in covered:
+                    if old_mentions is not None:
+                        old_mentions.append(
+                            f"{title} (HN) — выпуск от {covered[f'hn:{link}'].get('episode', '?')}"
+                        )
+                    continue
                 summary = entry.get("summary", "")
                 score_m = re.search(r"Points:\s*(\d+)", summary)
                 score = score_m.group(1) if score_m else "?"
+                if new_items is not None:
+                    new_items[f"hn:{link}"] = title
                 parts.append(f"- {title} (HN score: {score})\n  {link}")
                 if len(parts) >= max_items:
                     break
@@ -330,10 +414,17 @@ def fetch_hn_ai(queries: list[str], min_points: int = 30, max_items: int = 10) -
     return "## HackerNews — топ AI материалы\n" + "\n".join(parts)
 
 
-def fetch_hf_papers(days_back: int = 7, max_items: int = 8) -> str:
+def fetch_hf_papers(
+    days_back: int = 7,
+    max_items: int = 8,
+    covered: dict | None = None,
+    new_items: dict[str, str] | None = None,
+    old_mentions: list[str] | None = None,
+) -> str:
     """Fetch recent papers from HuggingFace daily papers."""
     parts = []
     seen = set()
+    covered = covered or {}
 
     try:
         client = httpx.Client()
@@ -360,8 +451,16 @@ def fetch_hf_papers(days_back: int = 7, max_items: int = 8) -> str:
                 if href in seen:
                     continue
                 seen.add(href)
+                if f"hf:{href}" in covered:
+                    if old_mentions is not None:
+                        old_mentions.append(
+                            f"{title} (HF paper) — выпуск от {covered[f'hf:{href}'].get('episode', '?')}"
+                        )
+                    continue
                 abstract_tag = article.find("p")
                 abstract = abstract_tag.get_text(strip=True)[:300] if abstract_tag else ""
+                if new_items is not None:
+                    new_items[f"hf:{href}"] = title
                 parts.append(f"- {title} ({date})\n  https://huggingface.co{href}\n  {abstract}")
                 if len(parts) >= max_items:
                     break
@@ -377,7 +476,14 @@ def fetch_hf_papers(days_back: int = 7, max_items: int = 8) -> str:
     return "## HuggingFace Papers — свежие статьи\n" + "\n".join(parts)
 
 
-def fetch_web_context(days_back: int, hn_cfg: dict, hf_cfg: dict) -> tuple[str, list[str]]:
+def fetch_web_context(
+    days_back: int,
+    hn_cfg: dict,
+    hf_cfg: dict,
+    covered: dict,
+    new_items: dict[str, str],
+    old_mentions: list[str],
+) -> tuple[str, list[str]]:
     """Fetch HN + HF papers per config. Returns (combined context string, list of sources)."""
     hn = ""
     if hn_cfg.get("enabled", True):
@@ -386,13 +492,17 @@ def fetch_web_context(days_back: int, hn_cfg: dict, hf_cfg: dict) -> tuple[str, 
             queries=hn_cfg.get("queries", ["AI LLM", "AI agent"]),
             min_points=hn_cfg.get("min_points", 30),
             max_items=hn_cfg.get("max_items", 10),
+            covered=covered, new_items=new_items, old_mentions=old_mentions,
         )
         print(f" {hn.count(chr(10))} строк")
 
     hf = ""
     if hf_cfg.get("enabled", True):
         print("[Web] HuggingFace Papers...", end="", flush=True)
-        hf = fetch_hf_papers(days_back, max_items=hf_cfg.get("max_items", 8))
+        hf = fetch_hf_papers(
+            days_back, max_items=hf_cfg.get("max_items", 8),
+            covered=covered, new_items=new_items, old_mentions=old_mentions,
+        )
         print(f" {hf.count(chr(10))} строк")
 
     sources = []
@@ -444,9 +554,20 @@ def generate_digest(context: str, date: str) -> str:
 
 
 def generate_script(digest: str) -> str:
-    """Stage 2: digest → dialogue script."""
-    print("[LLM] Генерирую сценарий из дайджеста...")
-    script = call_llm(SCRIPT_PROMPT.format(digest=digest), temperature=0.8)
+    """Stage 2: digest → dialogue script. Length scales with topic count."""
+    n_topics = len(re.findall(r"^##\s+(?!Коротко|Источники)", digest, flags=re.MULTILINE)) or 5
+    words_lo = min(max(n_topics * 230, 600), 1900)
+    words_hi = words_lo + 500
+    length_hint = f"~{max(words_lo // 170, 3)}-{words_hi // 150} минут, примерно {words_lo}-{words_hi} слов диалога"
+    topics_hint = (
+        f"все {n_topics} тем дайджеста" if n_topics <= 8
+        else "8 самых интересных тем дайджеста"
+    )
+    print(f"[LLM] Генерирую сценарий из дайджеста ({n_topics} тем → {length_hint})...")
+    script = call_llm(
+        SCRIPT_PROMPT.format(digest=digest, length_hint=length_hint, topics_hint=topics_hint),
+        temperature=0.8,
+    )
     print(f"[LLM] Сценарий готов: {len(script)} символов")
     return script
 
@@ -717,6 +838,8 @@ def main():
     )
     parser.add_argument("--days", type=int, default=7, help="За сколько дней брать материалы (default 7)")
     parser.add_argument("--dry-run", action="store_true", help="Только сценарий, без TTS и MP3")
+    parser.add_argument("--no-publish", action="store_true",
+                        help="Сгенерировать MP3+дайджест, но не публиковать в RSS (публикация из админки)")
     args = parser.parse_args()
 
     today = datetime.now().strftime("%Y-%m-%d")
@@ -729,12 +852,21 @@ def main():
         if c.get("enabled", True)
     ]
 
+    covered = load_covered()
+    new_items: dict[str, str] = {}
+    old_mentions: list[str] = []
+    if covered:
+        print(f"[covered] В базе освещённого: {len(covered)} материалов")
+
     # 1. Fetch YouTube transcripts
-    yt_context, yt_sources = fetch_youtube_context(args.days, channels)
+    yt_context, yt_sources = fetch_youtube_context(
+        args.days, channels, covered, new_items, old_mentions
+    )
 
     # 2. Fetch web sources
     web_context, web_sources = fetch_web_context(
-        args.days, cfg.get("hackernews", {}), cfg.get("huggingface_papers", {})
+        args.days, cfg.get("hackernews", {}), cfg.get("huggingface_papers", {}),
+        covered, new_items, old_mentions,
     )
 
     # 3. Build combined context
@@ -743,9 +875,17 @@ def main():
         print("ОШИБКА: нет материалов для подкаста")
         sys.exit(1)
 
+    if old_mentions:
+        context_parts.append(
+            "## Уже освещалось в прошлых выпусках\n"
+            "(заново не разбирать; можно кратко сослаться, если связано с новой темой)\n"
+            + "\n".join(f"- {m}" for m in old_mentions)
+        )
+        print(f"[covered] Пропущено как уже освещённое: {len(old_mentions)}")
+
     context = "\n\n".join(context_parts)
     sources = yt_sources + web_sources
-    print(f"[context] Всего символов: {len(context)}, источников: {len(sources)}")
+    print(f"[context] Всего символов: {len(context)}, источников: {len(sources)}, новых материалов: {len(new_items)}")
 
     # 4. Stage 1: digest
     digest = generate_digest(context, today)
@@ -791,7 +931,10 @@ def main():
     print(f"[parse] {len(lines)} реплик")
 
     # 7. Build audio: Gemini multi-speaker, fallback edge-tts
+    # Never overwrite an existing file (same-day regen + published episode + CF cache)
     mp3_path = EPISODES_DIR / f"{today}.mp3"
+    if mp3_path.exists():
+        mp3_path = EPISODES_DIR / f"{today}-{datetime.now().strftime('%H%M')}.mp3"
     if GEMINI_API_KEY:
         duration_sec = build_audio_gemini(lines, mp3_path)
         if duration_sec == 0:
@@ -804,32 +947,50 @@ def main():
         print("ОШИБКА: MP3 не создан")
         sys.exit(1)
 
-    # 8. Update RSS feed
-    try:
-        sys.path.insert(0, str(Path(__file__).parent))
-        import rss_manager
-        ep_num = rss_manager.get_next_episode_number()
-        title = f"Выпуск {ep_num} — {today}"
-        description = (
-            f"Еженедельный обзор AI новостей за неделю от {today}. "
-            f"Алекс и Саша обсуждают ключевые события в мире искусственного интеллекта. "
-            f"Выпуск полностью сгенерирован AI: дайджест, сценарий и голоса. "
-            f"Текстовый дайджест выпуска: {BASE_URL}/digests/{today}.html. "
-            f"Источники: {', '.join(sources) if sources else 'YouTube, HackerNews, HuggingFace Papers'}."
-        )
-        rss_manager.add_episode(
-            title=title,
-            description=description,
-            mp3_path=mp3_path,
-            duration_seconds=duration_sec,
-            episode_number=ep_num,
-        )
-    except Exception as e:
-        print(f"[RSS] ошибка обновления: {e}")
+    # 8. Episode manifest (admin panel uses it for publish prefill + covered merge)
+    sys.path.insert(0, str(Path(__file__).parent))
+    import rss_manager
+    ep_num = rss_manager.get_next_episode_number()
+    title = f"Выпуск {ep_num} — {today}"
+    description = (
+        f"Еженедельный обзор AI новостей за неделю от {today}. "
+        f"Алекс и Саша обсуждают ключевые события в мире искусственного интеллекта. "
+        f"Выпуск полностью сгенерирован AI: дайджест, сценарий и голоса. "
+        f"Текстовый дайджест выпуска: {BASE_URL}/digests/{today}.html. "
+        f"Источники: {', '.join(sources) if sources else 'YouTube, HackerNews, HuggingFace Papers'}."
+    )
+    manifest = {
+        "date": today,
+        "title": title,
+        "description": description,
+        "duration": duration_sec,
+        "mp3": mp3_path.name,
+        "sources": sources,
+        "items": new_items,
+    }
+    manifest_path = EPISODES_DIR / f"{mp3_path.stem}.items.json"
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=1), encoding="utf-8")
+    print(f"[manifest] → {manifest_path}")
+
+    # 9. Publish to RSS (unless deferred to the admin panel)
+    if args.no_publish:
+        print("[no-publish] В RSS не публикую — послушай и опубликуй из админки")
+    else:
+        try:
+            rss_manager.add_episode(
+                title=title,
+                description=description,
+                mp3_path=mp3_path,
+                duration_seconds=duration_sec,
+                episode_number=ep_num,
+            )
+            mark_covered(new_items, today)
+        except Exception as e:
+            print(f"[RSS] ошибка обновления: {e}")
 
     print(f"\n=== Готово ===")
     print(f"MP3:     {mp3_path}")
-    print(f"URL:     {BASE_URL}/episodes/{today}.mp3")
+    print(f"URL:     {BASE_URL}/episodes/{mp3_path.name}")
     print(f"Дайджест: {BASE_URL}/digests/{today}.html")
     print(f"RSS:     {BASE_URL}/feed.xml")
     duration_min = duration_sec // 60

@@ -4,3 +4,4 @@ feedparser>=6.0
 beautifulsoup4>=4.12
 pyyaml>=6.0
 markdown>=3.5
+telethon>=1.34

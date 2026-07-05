@@ -31,3 +31,16 @@ hackernews:
 huggingface_papers:
   enabled: true
   max_items: 8
+
+# Telegram-каналы читаются пользовательской сессией (tg_login.py — одноразовый
+# логин, TELEGRAM_* в .env). Список каналов — личный, поэтому живёт НЕ здесь,
+# а в sources.extra.yaml на сервере (правится из админки):
+#   telegram:
+#     channels:
+#       - {name: "@some_channel", category: "AI News"}
+#       - {name: "-1001234567890", category: "Private"}  # приватный — по id
+telegram:
+  enabled: true
+  max_posts_per_channel: 5
+  min_post_chars: 200
+  channels: []

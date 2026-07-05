@@ -87,6 +87,12 @@ def load_sources() -> dict:
             if q not in queries:
                 queries.append(q)
                 added += 1
+        tg_channels = cfg.setdefault("telegram", {}).setdefault("channels", [])
+        known_tg = {str(c.get("name", "")).lower() for c in tg_channels}
+        for c in extra.get("telegram", {}).get("channels", []):
+            if c.get("name") and str(c["name"]).lower() not in known_tg:
+                tg_channels.append(c)
+                added += 1
         if added:
             print(f"[sources] +{added} доп. источников из sources.extra.yaml")
     return cfg
@@ -474,6 +480,95 @@ def fetch_hf_papers(
     if not parts:
         return ""
     return "## HuggingFace Papers — свежие статьи\n" + "\n".join(parts)
+
+
+def fetch_telegram_context(
+    days_back: int,
+    tg_cfg: dict,
+    covered: dict,
+    new_items: dict[str, str],
+    old_mentions: list[str],
+) -> tuple[str, list[str]]:
+    """Fetch recent posts from subscribed Telegram channels via a user session.
+
+    Requires TELEGRAM_API_ID / TELEGRAM_API_HASH / TELEGRAM_SESSION env vars
+    (one-time login: tg_login.py). Works for private channels the account
+    is subscribed to. Covered posts are skipped like other sources.
+    """
+    channels = [c for c in tg_cfg.get("channels", []) if c.get("enabled", True)]
+    if not tg_cfg.get("enabled", True) or not channels:
+        return "", []
+
+    api_id = os.environ.get("TELEGRAM_API_ID", "")
+    api_hash = os.environ.get("TELEGRAM_API_HASH", "")
+    session = os.environ.get("TELEGRAM_SESSION", "")
+    if not (api_id and api_hash and session):
+        print("[TG] TELEGRAM_API_ID/API_HASH/SESSION не заданы — пропускаю Telegram (одноразовый логин: tg_login.py)")
+        return "", []
+    try:
+        from telethon.sync import TelegramClient
+        from telethon.sessions import StringSession
+    except ImportError:
+        print("[TG] telethon не установлен — пропускаю Telegram")
+        return "", []
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days_back)
+    max_posts = int(tg_cfg.get("max_posts_per_channel", 5))
+    min_chars = int(tg_cfg.get("min_post_chars", 200))
+    parts: list[str] = []
+    sources: list[str] = []
+
+    with TelegramClient(StringSession(session), int(api_id), api_hash) as client:
+        for i, ch in enumerate(channels, 1):
+            name = str(ch.get("name", "")).strip()
+            category = ch.get("category", "")
+            if not name:
+                continue
+            print(f"[TG {i}/{len(channels)}] {name} ({category})", end="", flush=True)
+            try:
+                # name: @username or numeric id (private channels have no username)
+                ident = int(name) if re.fullmatch(r"-?\d+", name) else name
+                entity = client.get_entity(ident)
+                username = getattr(entity, "username", None)
+                chan_key = username or str(getattr(entity, "id", name))
+                title = getattr(entity, "title", name)
+
+                posts = []
+                for msg in client.iter_messages(entity, limit=50):
+                    if msg.date < cutoff:
+                        break
+                    text = (msg.message or "").strip()
+                    if len(text) < min_chars:
+                        continue
+                    key = f"tg:{chan_key}/{msg.id}"
+                    if key in covered:
+                        old_mentions.append(
+                            f"{text[:80]}… (TG {title}) — выпуск от {covered[key].get('episode', '?')}"
+                        )
+                        continue
+                    link = (f"https://t.me/{username}/{msg.id}" if username
+                            else f"(приватный канал «{title}», пост {msg.id})")
+                    posts.append((key, text, link, msg.date))
+                    if len(posts) >= max_posts:
+                        break
+
+                if not posts:
+                    print(" — нет новых постов")
+                    continue
+
+                chan_parts = [f"\n## Telegram: {title} ({category})\n"]
+                for key, text, link, date in posts:
+                    new_items[key] = f"{title}: {text[:100]}"
+                    chan_parts.append(f"Пост ({date.strftime('%Y-%m-%d')}) {link}\n{text[:1500]}")
+                parts.append("\n\n".join(chan_parts))
+                sources.append(f"Telegram {title}")
+                print(f" — {len(posts)} постов")
+
+            except Exception as e:
+                print(f" — ошибка: {e}")
+            time.sleep(0.5)  # gentle: user session, don't hammer
+
+    return "\n\n".join(parts), sources
 
 
 def fetch_web_context(
@@ -869,8 +964,13 @@ def main():
         covered, new_items, old_mentions,
     )
 
+    # 2b. Fetch Telegram channels (user session; includes private subscriptions)
+    tg_context, tg_sources = fetch_telegram_context(
+        args.days, cfg.get("telegram", {}), covered, new_items, old_mentions
+    )
+
     # 3. Build combined context
-    context_parts = list(filter(None, [yt_context, web_context]))
+    context_parts = list(filter(None, [yt_context, web_context, tg_context]))
     if not context_parts:
         print("ОШИБКА: нет материалов для подкаста")
         sys.exit(1)
@@ -884,7 +984,7 @@ def main():
         print(f"[covered] Пропущено как уже освещённое: {len(old_mentions)}")
 
     context = "\n\n".join(context_parts)
-    sources = yt_sources + web_sources
+    sources = yt_sources + web_sources + tg_sources
     print(f"[context] Всего символов: {len(context)}, источников: {len(sources)}, новых материалов: {len(new_items)}")
 
     # Output stem: never overwrite same-day artifacts (published episode/digest

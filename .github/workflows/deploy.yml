@@ -19,21 +19,20 @@ jobs:
           script: |
             set -e
             SKILL_DIR="/home/sokolmask/hermes-data/skills/podcast"
-            PODCAST_DIR="/home/sokolmask/podcast-data"
+            PODCAST_DIR="/home/sokolmask/hermes-data/podcast"
 
             # Pull latest code
             cd "$SKILL_DIR"
             git pull origin main
 
-            # Sync docker config (nginx.conf may change)
-            cp docker/nginx.conf "$PODCAST_DIR/nginx-podcast-location.conf"
-            cp docker/docker-compose.yml "$PODCAST_DIR/docker-compose.yml"
+            # Sync cover art to podcast data dir
+            cp cover.jpg "$PODCAST_DIR/cover.jpg"
 
-            # Install/update Python deps
-            /opt/hermes/.venv/bin/pip install -q -r requirements.txt
+            # Install/update Python deps via uv
+            docker exec hermes uv pip install -q -r /opt/data/skills/podcast/requirements.txt || true
 
             # Restart static server if docker config changed
-            cd "$PODCAST_DIR"
+            cd "$SKILL_DIR/docker"
             docker compose restart podcast-static
 
             echo "Deploy done."

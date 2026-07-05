@@ -12,6 +12,8 @@ Usage:
 Environment variables:
     YOUTUBE_API_KEY      — YouTube Data API v3
     OPENROUTER_API_KEY   — OpenRouter API key
+    GEMINI_API_KEY       — Google AI Studio key (multi-speaker TTS; fallback: edge-tts)
+    PODCAST_DATA_DIR     — data dir override (default /opt/data/podcast)
 """
 
 import os
@@ -32,17 +34,27 @@ from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, No
 
 YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY", "")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 OPENROUTER_MODEL = "google/gemini-2.5-flash"
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 
+GEMINI_TTS_MODEL = "gemini-3.1-flash-tts-preview"
+GEMINI_API_URL = "https://generativelanguage.googleapis.com"
+GEMINI_TTS_SAMPLE_RATE = 24000       # PCM s16le mono
+GEMINI_TTS_BLOCK_CHARS = 3500        # max script chars per TTS request
+
 EDGE_TTS = "/opt/hermes/.venv/bin/edge-tts"
-EPISODES_DIR = Path("/opt/data/podcast/episodes")
-RSS_DATA_DIR = Path("/opt/data/podcast")
+DATA_DIR = Path(os.environ.get("PODCAST_DATA_DIR", "/opt/data/podcast"))
+EPISODES_DIR = DATA_DIR / "episodes"
+RSS_DATA_DIR = DATA_DIR
+DIGESTS_DIR = DATA_DIR / "digests"
 BASE_URL = "https://whntpdcst.com"
 
 VOICE_ALEX = "ru-RU-DmitryNeural"   # Алекс — male
 VOICE_SASHA = "ru-RU-SvetlanaNeural"  # Саша — female
+GEMINI_VOICE_ALEX = "Charon"   # male
+GEMINI_VOICE_SASHA = "Leda"    # female
 
 SILENCE_BETWEEN_SPEAKERS_SEC = 0.3
 
@@ -69,6 +81,24 @@ CHANNELS = [
     ("@ycombinator",        "Startups"),
 ]
 
+DIGEST_PROMPT = """Ты — редактор еженедельного дайджеста «Что нового в AI».
+
+На основе сырых материалов ниже (транскрипты YouTube, HackerNews, свежие статьи) составь \
+структурированный дайджест недели на русском языке в формате Markdown.
+
+Правила:
+- Начни с заголовка первого уровня: # Что нового в AI — {date}
+- Отбери 6-10 самых значимых тем недели, каждая — раздел с заголовком ##
+- В каждой теме: что произошло (конкретные факты, цифры, названия), почему это важно, \
+что это значит на практике для людей и разработчиков
+- В конце темы строка «Источники:» со ссылками из материалов, если они там есть
+- Раздел «## Коротко» в конце — остальные заметные новости, по одной строке
+- Пиши плотно и фактурно, без воды, вступлений и выводов «в целом неделя показала»
+- Английские названия продуктов, моделей и компаний оставляй латиницей как есть
+
+Материалы этой недели:
+{context}"""
+
 SCRIPT_PROMPT = """Ты пишешь сценарий для подкаста «Что нового в AI» с двумя ведущими.
 
 Ведущий АЛЕКС — мужчина, аналитичный, лаконичный, любит конкретные факты и цифры, задаёт острые вопросы.
@@ -77,10 +107,10 @@ SCRIPT_PROMPT = """Ты пишешь сценарий для подкаста «
 Стиль: как NotebookLM Audio Overview — живой, естественный разговор, не лекция. Ведущие перебивают друг друга, \
 уточняют, иногда удивляются. Без формальных переходов типа «теперь поговорим о...».
 
-На основе материалов ниже напиши эпизод подкаста (~8-12 минут, примерно 1500-2000 слов диалога) на русском языке.
+На основе дайджеста ниже напиши эпизод подкаста (~8-12 минут, примерно 1500-2000 слов диалога) на русском языке.
 
 Правила:
-- Охвати 5-8 самых интересных тем из материалов ниже
+- Охвати 5-8 самых интересных тем дайджеста
 - По каждой теме: что произошло → почему важно → что это значит для людей/разработчиков
 - Только живой разговор — никаких списков, никаких буллетов в репликах
 - Начинай сразу с темы — без «добро пожаловать», без «сегодня мы поговорим»
@@ -91,8 +121,8 @@ SCRIPT_PROMPT = """Ты пишешь сценарий для подкаста «
 САША: текст реплики
 АЛЕКС: текст реплики
 
-Материалы этой недели:
-{context}"""
+Дайджест недели:
+{digest}"""
 
 
 # ── YouTube helpers ───────────────────────────────────────────────────────────
@@ -172,13 +202,17 @@ def get_transcript(video_id: str, max_chars: int = 5000) -> str | None:
     return None
 
 
-def fetch_youtube_context(days_back: int) -> str:
-    """Fetch transcripts from all tracked channels. Returns formatted context string."""
+def fetch_youtube_context(days_back: int) -> tuple[str, list[str]]:
+    """Fetch transcripts from all tracked channels.
+
+    Returns (formatted context string, list of sources that had videos).
+    """
     if not YOUTUBE_API_KEY:
         print("[YT] YOUTUBE_API_KEY not set — skipping YouTube")
-        return ""
+        return "", []
 
     parts = []
+    sources = []
     client = httpx.Client()
 
     for i, (handle, category) in enumerate(CHANNELS, 1):
@@ -198,7 +232,9 @@ def fetch_youtube_context(days_back: int) -> str:
 
             channel_parts = [f"\n## YouTube: {handle} ({category})\n"]
             for v in videos:
-                channel_parts.append(f"Видео: {v['title']} ({v['published']})")
+                channel_parts.append(
+                    f"Видео: {v['title']} ({v['published']}) https://youtube.com/watch?v={v['id']}"
+                )
                 transcript = get_transcript(v["id"])
                 if transcript:
                     channel_parts.append(f"Транскрипт: {transcript}")
@@ -208,6 +244,7 @@ def fetch_youtube_context(days_back: int) -> str:
                     print("d", end="", flush=True)
 
             parts.append("\n".join(channel_parts))
+            sources.append(f"YouTube {handle} ({category})")
             print()
 
         except Exception as e:
@@ -216,7 +253,7 @@ def fetch_youtube_context(days_back: int) -> str:
         time.sleep(0.2)  # gentle rate limiting
 
     client.close()
-    return "\n\n".join(parts)
+    return "\n\n".join(parts), sources
 
 
 # ── Web sources ───────────────────────────────────────────────────────────────
@@ -304,8 +341,8 @@ def fetch_hf_papers(days_back: int = 7, max_items: int = 8) -> str:
     return "## HuggingFace Papers — свежие статьи\n" + "\n".join(parts)
 
 
-def fetch_web_context(days_back: int) -> str:
-    """Fetch HN + HF papers. Returns combined context string."""
+def fetch_web_context(days_back: int) -> tuple[str, list[str]]:
+    """Fetch HN + HF papers. Returns (combined context string, list of sources)."""
     print("[Web] HackerNews...", end="", flush=True)
     hn = fetch_hn_ai()
     print(f" {hn.count(chr(10))} строк")
@@ -314,29 +351,26 @@ def fetch_web_context(days_back: int) -> str:
     hf = fetch_hf_papers(days_back)
     print(f" {hf.count(chr(10))} строк")
 
-    return "\n\n".join(filter(None, [hn, hf]))
+    sources = []
+    if hn:
+        sources.append("HackerNews")
+    if hf:
+        sources.append("HuggingFace Papers")
+    return "\n\n".join(filter(None, [hn, hf])), sources
 
 
-# ── Script generation ─────────────────────────────────────────────────────────
+# ── Digest & script generation ────────────────────────────────────────────────
 
-def generate_script(context: str) -> str:
-    """Call OpenRouter API to generate podcast script."""
+def call_llm(prompt: str, temperature: float, max_tokens: int = 4096) -> str:
+    """Call OpenRouter chat completions, return message content."""
     if not OPENROUTER_API_KEY:
         sys.exit("ERROR: OPENROUTER_API_KEY not set")
-
-    # Truncate context to ~50000 chars
-    if len(context) > 50000:
-        context = context[:50000] + "\n\n[... материалы обрезаны ...]"
-
-    prompt = SCRIPT_PROMPT.format(context=context)
-
-    print(f"[LLM] Генерирую сценарий ({len(context)} символов контекста)...")
 
     payload = {
         "model": OPENROUTER_MODEL,
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 4096,
-        "temperature": 0.8,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
     }
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
@@ -345,12 +379,30 @@ def generate_script(context: str) -> str:
         "X-Title": "AI Podcast Generator",
     }
 
-    with httpx.Client(timeout=120) as client:
+    with httpx.Client(timeout=180) as client:
         resp = client.post(OPENROUTER_API_URL, json=payload, headers=headers)
         resp.raise_for_status()
         data = resp.json()
 
-    script = data["choices"][0]["message"]["content"]
+    return data["choices"][0]["message"]["content"]
+
+
+def generate_digest(context: str, date: str) -> str:
+    """Stage 1: raw materials → structured Markdown digest."""
+    # Truncate context to ~50000 chars
+    if len(context) > 50000:
+        context = context[:50000] + "\n\n[... материалы обрезаны ...]"
+
+    print(f"[LLM] Генерирую дайджест ({len(context)} символов контекста)...")
+    digest = call_llm(DIGEST_PROMPT.format(date=date, context=context), temperature=0.4)
+    print(f"[LLM] Дайджест готов: {len(digest)} символов")
+    return digest
+
+
+def generate_script(digest: str) -> str:
+    """Stage 2: digest → dialogue script."""
+    print("[LLM] Генерирую сценарий из дайджеста...")
+    script = call_llm(SCRIPT_PROMPT.format(digest=digest), temperature=0.8)
     print(f"[LLM] Сценарий готов: {len(script)} символов")
     return script
 
@@ -520,6 +572,99 @@ def build_audio(lines: list[tuple[str, str]], output_path: Path) -> int:
     return 0
 
 
+# ── Gemini multi-speaker TTS ──────────────────────────────────────────────────
+
+def gemini_tts_request(text: str) -> bytes | None:
+    """One multi-speaker TTS request. Returns raw PCM (s16le, 24kHz, mono)."""
+    import base64
+
+    payload = {
+        "contents": [{"parts": [{"text": "Озвучь этот разговор двух ведущих подкаста живо и естественно:\n\n" + text}]}],
+        "generationConfig": {
+            "responseModalities": ["AUDIO"],
+            "speechConfig": {"multiSpeakerVoiceConfig": {"speakerVoiceConfigs": [
+                {"speaker": "АЛЕКС", "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": GEMINI_VOICE_ALEX}}},
+                {"speaker": "САША", "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": GEMINI_VOICE_SASHA}}},
+            ]}},
+        },
+    }
+    for attempt in range(3):
+        try:
+            resp = httpx.post(
+                f"{GEMINI_API_URL}/v1beta/models/{GEMINI_TTS_MODEL}:generateContent",
+                headers={"x-goog-api-key": GEMINI_API_KEY},
+                json=payload,
+                timeout=300,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            b64 = data["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
+            return base64.b64decode(b64)
+        except Exception as e:
+            print(f"  [Gemini TTS] попытка {attempt + 1}: {e}")
+            time.sleep(5)
+    return None
+
+
+def build_audio_gemini(lines: list[tuple[str, str]], output_path: Path) -> int:
+    """
+    Multi-speaker TTS via Gemini API: dialogue blocks → PCM → CBR 64k MP3.
+    Returns duration in seconds (0 on failure — caller falls back to edge-tts).
+    """
+    EPISODES_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Split dialogue into blocks that fit one TTS request
+    blocks: list[str] = []
+    cur: list[str] = []
+    cur_len = 0
+    for speaker, text in lines:
+        line = f"{speaker}: {text}"
+        if cur and cur_len + len(line) > GEMINI_TTS_BLOCK_CHARS:
+            blocks.append("\n".join(cur))
+            cur, cur_len = [], 0
+        cur.append(line)
+        cur_len += len(line)
+    if cur:
+        blocks.append("\n".join(cur))
+
+    print(f"[Gemini TTS] {len(lines)} реплик → {len(blocks)} блоков")
+    silence = b"\x00" * (int(SILENCE_BETWEEN_SPEAKERS_SEC * GEMINI_TTS_SAMPLE_RATE) * 2)
+    pcm = bytearray()
+    for i, block in enumerate(blocks, 1):
+        print(f"  [Gemini TTS {i}/{len(blocks)}] {len(block)} символов...")
+        audio = gemini_tts_request(block)
+        if audio is None:
+            print(f"[Gemini TTS] блок {i} не озвучился")
+            return 0
+        if pcm:
+            pcm += silence
+        pcm += audio
+
+    with tempfile.NamedTemporaryFile(suffix=".pcm", delete=False) as f:
+        pcm_path = Path(f.name)
+        f.write(bytes(pcm))
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-f", "s16le", "-ar", str(GEMINI_TTS_SAMPLE_RATE), "-ac", "1",
+        "-i", str(pcm_path),
+        "-acodec", "libmp3lame", "-b:a", "64k", "-ar", "22050", "-ac", "1",
+        str(output_path),
+    ]
+    try:
+        subprocess.run(cmd, capture_output=True, timeout=300, check=True)
+    except Exception as e:
+        print(f"  [Gemini TTS ffmpeg] ошибка: {e}")
+        return 0
+    finally:
+        pcm_path.unlink(missing_ok=True)
+
+    duration = get_audio_duration(output_path)
+    size_mb = output_path.stat().st_size / 1_048_576
+    print(f"[audio] Готово → {output_path}  ({duration}с, {size_mb:.1f} МБ)")
+    return duration
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -534,10 +679,10 @@ def main():
     print(f"=== Подкаст 'Что нового в AI' — {today} (за {args.days} дней) ===")
 
     # 1. Fetch YouTube transcripts
-    yt_context = fetch_youtube_context(args.days)
+    yt_context, yt_sources = fetch_youtube_context(args.days)
 
     # 2. Fetch web sources
-    web_context = fetch_web_context(args.days)
+    web_context, web_sources = fetch_web_context(args.days)
 
     # 3. Build combined context
     context_parts = list(filter(None, [yt_context, web_context]))
@@ -546,47 +691,72 @@ def main():
         sys.exit(1)
 
     context = "\n\n".join(context_parts)
-    print(f"[context] Всего символов: {len(context)}")
+    sources = yt_sources + web_sources
+    print(f"[context] Всего символов: {len(context)}, источников: {len(sources)}")
 
-    # 4. Generate script
-    script = generate_script(context)
+    # 4. Stage 1: digest
+    digest = generate_digest(context, today)
+    if sources:
+        digest += "\n\n## Источники выпуска\n" + "\n".join(f"- {s}" for s in sources)
+
+    DIGESTS_DIR.mkdir(parents=True, exist_ok=True)
+    digest_path = DIGESTS_DIR / f"{today}.md"
+    digest_path.write_text(digest, encoding="utf-8")
+    print(f"[digest] Сохранён → {digest_path}")
+
+    # 5. Stage 2: script from digest
+    script = generate_script(digest)
 
     # Save script for debugging
-    script_path = EPISODES_DIR.parent / f"script_{today}.txt"
+    script_path = DATA_DIR / f"script_{today}.txt"
     script_path.parent.mkdir(parents=True, exist_ok=True)
     script_path.write_text(script, encoding="utf-8")
     print(f"[script] Сохранён → {script_path}")
 
     if args.dry_run:
         print("[dry-run] Пропускаю TTS и RSS. Готово.")
+        print(f"\nДайджест:\n{'='*60}")
+        print(digest[:3000])
         print(f"\nСценарий:\n{'='*60}")
         print(script[:3000])
         if len(script) > 3000:
             print(f"\n... (ещё {len(script)-3000} символов, см. {script_path})")
         return
 
-    # 5. Parse script
+    # 6. Parse script
     lines = parse_script(script)
     if not lines:
         print(f"ОШИБКА: не удалось распарсить сценарий. Проверь {script_path}")
         sys.exit(1)
     print(f"[parse] {len(lines)} реплик")
 
-    # 6. Build audio
+    # 7. Build audio: Gemini multi-speaker, fallback edge-tts
     mp3_path = EPISODES_DIR / f"{today}.mp3"
-    duration_sec = build_audio(lines, mp3_path)
+    if GEMINI_API_KEY:
+        duration_sec = build_audio_gemini(lines, mp3_path)
+        if duration_sec == 0:
+            print("[audio] Gemini TTS не сработал — fallback на edge-tts")
+            duration_sec = build_audio(lines, mp3_path)
+    else:
+        duration_sec = build_audio(lines, mp3_path)
 
     if not mp3_path.exists() or duration_sec == 0:
         print("ОШИБКА: MP3 не создан")
         sys.exit(1)
 
-    # 7. Update RSS feed
+    # 8. Update RSS feed
     try:
         sys.path.insert(0, str(Path(__file__).parent))
         import rss_manager
         ep_num = rss_manager.get_next_episode_number()
         title = f"Выпуск {ep_num} — {today}"
-        description = f"Еженедельный обзор AI новостей за неделю от {today}. Алекс и Саша обсуждают ключевые события в мире искусственного интеллекта."
+        description = (
+            f"Еженедельный обзор AI новостей за неделю от {today}. "
+            f"Алекс и Саша обсуждают ключевые события в мире искусственного интеллекта. "
+            f"Выпуск полностью сгенерирован AI: дайджест, сценарий и голоса. "
+            f"Текстовый дайджест выпуска: {BASE_URL}/digests/{today}.md. "
+            f"Источники: {', '.join(sources) if sources else 'YouTube, HackerNews, HuggingFace Papers'}."
+        )
         rss_manager.add_episode(
             title=title,
             description=description,
@@ -598,9 +768,10 @@ def main():
         print(f"[RSS] ошибка обновления: {e}")
 
     print(f"\n=== Готово ===")
-    print(f"MP3:  {mp3_path}")
-    print(f"URL:  {BASE_URL}/episodes/{today}.mp3")
-    print(f"RSS:  {BASE_URL}/feed.xml")
+    print(f"MP3:     {mp3_path}")
+    print(f"URL:     {BASE_URL}/episodes/{today}.mp3")
+    print(f"Дайджест: {BASE_URL}/digests/{today}.md")
+    print(f"RSS:     {BASE_URL}/feed.xml")
     duration_min = duration_sec // 60
     print(f"Длительность: ~{duration_min} мин")
 

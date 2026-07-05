@@ -65,8 +65,8 @@ setup-carbon.sh    # one-time setup на сервере
 
 ## Админка
 
-`http://carbon:8086` (LAN-only, не выходит в Cloudflare Tunnel). HTTP Basic:
-`ADMIN_USER`/`ADMIN_PASSWORD` из env Hermes.
+`https://admin.whntpdcst.com` (через Cloudflare Tunnel) или `http://carbon:8086` в LAN.
+HTTP Basic: `ADMIN_USER`/`ADMIN_PASSWORD` из env Hermes.
 
 Умеет: снять эпизод с публикации / вернуть, править название и описание,
 загрузить свою запись (любой аудиоформат → CBR 64k MP3) и опубликовать,

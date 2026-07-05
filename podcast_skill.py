@@ -58,28 +58,15 @@ GEMINI_VOICE_SASHA = "Leda"    # female
 
 SILENCE_BETWEEN_SPEAKERS_SEC = 0.3
 
-# YouTube channels to track: (handle, category)
-CHANNELS = [
-    # AI/ML
-    ("@NateBJones",         "AI Strategy"),
-    ("@aiexplained",        "AI News"),
-    ("@aiDotEngineer",      "AI Engineering"),
-    ("@AndrejKarpathy",     "ML/AI Deep Dives"),
-    ("@YannicKilcher",      "ML Research"),
-    ("@googledeepmind",     "AI Research"),
-    ("@anthropicai",        "AI Safety"),
-    ("@OpenAI",             "AI"),
-    ("@HuggingFace",        "Open Source ML"),
-    ("@mlst",               "ML Research"),
-    ("@TwoMinutePapers",    "ML Research"),
-    ("@SamWitherspoon",     "AI Tools"),
-    # Dev/Tools
-    ("@GosuCoder",          "AI Agents"),
-    ("@AIJasonZ",           "AI Products"),
-    ("@NetworkChuck",       "IT/DevOps"),
-    ("@ThePragmaticEngineer", "Tech Industry"),
-    ("@ycombinator",        "Startups"),
-]
+SOURCES_PATH = Path(os.environ.get("PODCAST_SOURCES", Path(__file__).parent / "sources.yaml"))
+
+
+def load_sources() -> dict:
+    """Load source configuration from sources.yaml."""
+    import yaml
+    if not SOURCES_PATH.exists():
+        sys.exit(f"ОШИБКА: конфиг источников не найден: {SOURCES_PATH}")
+    return yaml.safe_load(SOURCES_PATH.read_text(encoding="utf-8")) or {}
 
 DIGEST_PROMPT = """Ты — редактор еженедельного дайджеста «Что нового в AI».
 
@@ -123,6 +110,49 @@ SCRIPT_PROMPT = """Ты пишешь сценарий для подкаста «
 
 Дайджест недели:
 {digest}"""
+
+
+DIGEST_HTML_TEMPLATE = """<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{title}</title>
+<style>
+  body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+         max-width: 42rem; margin: 0 auto; padding: 1.5rem; line-height: 1.6;
+         color: #1a1a2e; background: #fdfdfb; }}
+  h1 {{ font-size: 1.6rem; line-height: 1.3; }}
+  h2 {{ font-size: 1.2rem; margin-top: 2rem; border-bottom: 1px solid #ddd; padding-bottom: .3rem; }}
+  a {{ color: #3563a8; word-break: break-all; }}
+  li {{ margin-bottom: .4rem; }}
+  .footer {{ margin-top: 3rem; font-size: .85rem; color: #888; }}
+  @media (prefers-color-scheme: dark) {{
+    body {{ color: #e8e8e8; background: #16161e; }}
+    h2 {{ border-color: #333; }}
+    a {{ color: #7fa7e0; }}
+  }}
+</style>
+</head>
+<body>
+{body}
+<p class="footer">Дайджест сгенерирован AI · <a href="{base_url}/feed.xml">Подкаст «Что нового в AI»</a></p>
+</body>
+</html>
+"""
+
+
+def render_digest_html(digest_md: str, out_path: Path, title: str) -> None:
+    """Render the MD digest to a standalone mobile-friendly HTML page."""
+    import markdown
+
+    # Wrap bare URLs into <...> so python-markdown turns them into links
+    linked = re.sub(r'(?<![\(<"])(https?://[^\s<>\)\]",]+)', r"<\1>", digest_md)
+    body = markdown.markdown(linked, extensions=["extra"])
+    out_path.write_text(
+        DIGEST_HTML_TEMPLATE.format(title=title, body=body, base_url=BASE_URL),
+        encoding="utf-8",
+    )
 
 
 # ── YouTube helpers ───────────────────────────────────────────────────────────
@@ -207,21 +237,24 @@ def get_transcript(video_id: str, max_chars: int = 5000) -> str | None:
     return None
 
 
-def fetch_youtube_context(days_back: int) -> tuple[str, list[str]]:
-    """Fetch transcripts from all tracked channels.
+def fetch_youtube_context(days_back: int, channels: list[tuple[str, str]]) -> tuple[str, list[str]]:
+    """Fetch transcripts from configured channels.
 
     Returns (formatted context string, list of sources that had videos).
     """
     if not YOUTUBE_API_KEY:
         print("[YT] YOUTUBE_API_KEY not set — skipping YouTube")
         return "", []
+    if not channels:
+        print("[YT] нет активных каналов в sources.yaml")
+        return "", []
 
     parts = []
     sources = []
     client = httpx.Client()
 
-    for i, (handle, category) in enumerate(CHANNELS, 1):
-        print(f"[YT {i}/{len(CHANNELS)}] {handle} ({category})", end="", flush=True)
+    for i, (handle, category) in enumerate(channels, 1):
+        print(f"[YT {i}/{len(channels)}] {handle} ({category})", end="", flush=True)
         try:
             playlist_id = resolve_uploads_playlist(client, handle)
             if not playlist_id:
@@ -263,18 +296,16 @@ def fetch_youtube_context(days_back: int) -> tuple[str, list[str]]:
 
 # ── Web sources ───────────────────────────────────────────────────────────────
 
-def fetch_hn_ai(max_items: int = 10) -> str:
+def fetch_hn_ai(queries: list[str], min_points: int = 30, max_items: int = 10) -> str:
     """Fetch top AI stories from HackerNews RSS."""
     parts = []
-    queries = ["AI LLM", "machine learning", "Claude GPT", "AI agent"]
     seen = set()
 
     try:
         client = httpx.Client()
         import feedparser  # type: ignore
         for query in queries:
-            url = f"https://hnrss.org/newest?q={httpx.URL('').copy_with()}&points=30&count=8"
-            url = f"https://hnrss.org/newest?q={query.replace(' ', '+')}&points=30&count=8"
+            url = f"https://hnrss.org/newest?q={query.replace(' ', '+')}&points={min_points}&count=8"
             feed = feedparser.parse(url)
             for entry in feed.entries:
                 link = entry.get("link", "")
@@ -346,15 +377,23 @@ def fetch_hf_papers(days_back: int = 7, max_items: int = 8) -> str:
     return "## HuggingFace Papers — свежие статьи\n" + "\n".join(parts)
 
 
-def fetch_web_context(days_back: int) -> tuple[str, list[str]]:
-    """Fetch HN + HF papers. Returns (combined context string, list of sources)."""
-    print("[Web] HackerNews...", end="", flush=True)
-    hn = fetch_hn_ai()
-    print(f" {hn.count(chr(10))} строк")
+def fetch_web_context(days_back: int, hn_cfg: dict, hf_cfg: dict) -> tuple[str, list[str]]:
+    """Fetch HN + HF papers per config. Returns (combined context string, list of sources)."""
+    hn = ""
+    if hn_cfg.get("enabled", True):
+        print("[Web] HackerNews...", end="", flush=True)
+        hn = fetch_hn_ai(
+            queries=hn_cfg.get("queries", ["AI LLM", "AI agent"]),
+            min_points=hn_cfg.get("min_points", 30),
+            max_items=hn_cfg.get("max_items", 10),
+        )
+        print(f" {hn.count(chr(10))} строк")
 
-    print("[Web] HuggingFace Papers...", end="", flush=True)
-    hf = fetch_hf_papers(days_back)
-    print(f" {hf.count(chr(10))} строк")
+    hf = ""
+    if hf_cfg.get("enabled", True):
+        print("[Web] HuggingFace Papers...", end="", flush=True)
+        hf = fetch_hf_papers(days_back, max_items=hf_cfg.get("max_items", 8))
+        print(f" {hf.count(chr(10))} строк")
 
     sources = []
     if hn:
@@ -683,11 +722,20 @@ def main():
     today = datetime.now().strftime("%Y-%m-%d")
     print(f"=== Подкаст 'Что нового в AI' — {today} (за {args.days} дней) ===")
 
+    cfg = load_sources()
+    channels = [
+        (c["handle"], c.get("category", ""))
+        for c in cfg.get("youtube", {}).get("channels", [])
+        if c.get("enabled", True)
+    ]
+
     # 1. Fetch YouTube transcripts
-    yt_context, yt_sources = fetch_youtube_context(args.days)
+    yt_context, yt_sources = fetch_youtube_context(args.days, channels)
 
     # 2. Fetch web sources
-    web_context, web_sources = fetch_web_context(args.days)
+    web_context, web_sources = fetch_web_context(
+        args.days, cfg.get("hackernews", {}), cfg.get("huggingface_papers", {})
+    )
 
     # 3. Build combined context
     context_parts = list(filter(None, [yt_context, web_context]))
@@ -708,6 +756,13 @@ def main():
     digest_path = DIGESTS_DIR / f"{today}.md"
     digest_path.write_text(digest, encoding="utf-8")
     print(f"[digest] Сохранён → {digest_path}")
+
+    try:
+        html_path = DIGESTS_DIR / f"{today}.html"
+        render_digest_html(digest, html_path, f"Что нового в AI — {today}")
+        print(f"[digest] HTML → {html_path}")
+    except Exception as e:
+        print(f"[digest] HTML не сгенерирован: {e}")
 
     # 5. Stage 2: script from digest
     script = generate_script(digest)
@@ -759,7 +814,7 @@ def main():
             f"Еженедельный обзор AI новостей за неделю от {today}. "
             f"Алекс и Саша обсуждают ключевые события в мире искусственного интеллекта. "
             f"Выпуск полностью сгенерирован AI: дайджест, сценарий и голоса. "
-            f"Текстовый дайджест выпуска: {BASE_URL}/digests/{today}.md. "
+            f"Текстовый дайджест выпуска: {BASE_URL}/digests/{today}.html. "
             f"Источники: {', '.join(sources) if sources else 'YouTube, HackerNews, HuggingFace Papers'}."
         )
         rss_manager.add_episode(
@@ -775,7 +830,7 @@ def main():
     print(f"\n=== Готово ===")
     print(f"MP3:     {mp3_path}")
     print(f"URL:     {BASE_URL}/episodes/{today}.mp3")
-    print(f"Дайджест: {BASE_URL}/digests/{today}.md")
+    print(f"Дайджест: {BASE_URL}/digests/{today}.html")
     print(f"RSS:     {BASE_URL}/feed.xml")
     duration_min = duration_sec // 60
     print(f"Длительность: ~{duration_min} мин")

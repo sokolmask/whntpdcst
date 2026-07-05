@@ -14,11 +14,12 @@ HackerNews AI ─────────┤──► Gemini 2.5 Flash ──►
 HuggingFace Papers ────┘       (диалог ~10 мин)    Алекс + Саша     Apple Podcasts
 ```
 
-1. Собирает транскрипты YouTube и топ материалы недели
-2. Gemini генерирует живой диалог двух ведущих (~10 мин, ~1500 слов)
-3. edge-tts озвучивает: Алекс (`ru-RU-DmitryNeural`) + Саша (`ru-RU-SvetlanaNeural`)
-4. ffmpeg склеивает в CBR 64k MP3
-5. RSS обновляется → Apple Podcasts подхватывает автоматически
+1. Собирает транскрипты YouTube и топ материалы недели (источники — в `sources.yaml`)
+2. Gemini пишет структурированный дайджест → [whntpdcst.com/digests/](https://whntpdcst.com/digests/) (MD + HTML)
+3. Из дайджеста генерируется живой диалог двух ведущих (~10 мин)
+4. Gemini multi-speaker TTS озвучивает: Алекс (`Charon`) + Саша (`Leda`); fallback — edge-tts
+5. ffmpeg кодирует в CBR 64k MP3
+6. RSS обновляется → Apple Podcasts подхватывает автоматически
 
 ## Запуск
 
@@ -55,6 +56,7 @@ OPENROUTER_API_KEY=...
 
 ```
 podcast_skill.py   # основной pipeline
+sources.yaml       # источники (YouTube каналы, HN, HF) — правь и пушь
 rss_manager.py     # Apple Podcasts-совместимый RSS
 docker/            # nginx static server (порт 8085)
 setup-carbon.sh    # one-time setup на сервере

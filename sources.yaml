@@ -1,0 +1,33 @@
+# Источники подкаста «Что нового в AI».
+# Управление: правь этот файл и пушь в main — деплой подтянет.
+# enabled: false выключает источник без удаления из списка (по умолчанию true).
+
+youtube:
+  channels:
+    - {handle: "@NateBJones",           category: "AI Strategy"}
+    - {handle: "@aiexplained",          category: "AI News"}
+    - {handle: "@aiDotEngineer",        category: "AI Engineering"}
+    - {handle: "@AndrejKarpathy",       category: "ML/AI Deep Dives"}
+    - {handle: "@YannicKilcher",        category: "ML Research"}
+    - {handle: "@googledeepmind",       category: "AI Research"}
+    - {handle: "@anthropic-ai",         category: "AI Safety"}
+    - {handle: "@OpenAI",               category: "AI"}
+    - {handle: "@HuggingFace",          category: "Open Source ML"}
+    - {handle: "@mlst",                 category: "ML Research"}
+    - {handle: "@TwoMinutePapers",      category: "ML Research"}
+    - {handle: "@SamWitherspoon",       category: "AI Tools"}
+    - {handle: "@GosuCoder",            category: "AI Agents"}
+    - {handle: "@AIJasonZ",             category: "AI Products"}
+    - {handle: "@NetworkChuck",         category: "IT/DevOps"}
+    - {handle: "@ThePragmaticEngineer", category: "Tech Industry"}
+    - {handle: "@ycombinator",          category: "Startups"}
+
+hackernews:
+  enabled: true
+  min_points: 30
+  max_items: 10
+  queries: ["AI LLM", "machine learning", "Claude GPT", "AI agent"]
+
+huggingface_papers:
+  enabled: true
+  max_items: 8

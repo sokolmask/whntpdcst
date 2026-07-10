@@ -14,6 +14,7 @@ Blog posts are managed from the admin panel; format:
     title: Заголовок
     date: 2026-07-05
     lang: ru          # ru | en
+    pair: my-post-en  # slug перевода (опционально) — язык-toggle ведёт на него
     ---
     markdown body
 """
@@ -318,6 +319,7 @@ def load_posts() -> list[dict]:
             "date": str(meta.get("date", "")),
             "lang": str(meta.get("lang", "ru")),
             "draft": bool(meta.get("draft", False)),
+            "pair": str(meta.get("pair", "")),   # slug of the translation, if any
             "body_md": body,
         })
     posts.sort(key=lambda x: x["date"], reverse=True)
@@ -325,13 +327,30 @@ def load_posts() -> list[dict]:
 
 
 def blog_pages() -> None:
-    """Posts are single pages (each in its own language); the index exists in both."""
+    """Posts are single pages in their own language; translations are linked
+    via `pair: <slug>` frontmatter — the language toggle then goes to the pair."""
     posts = load_posts()
-    items = []
+    by_slug = {p["slug"]: p for p in posts}
+
+    def listing_for(lang: str) -> str:
+        # Own-language posts + other-language posts without a translation
+        items = []
+        for post in posts:
+            if post["lang"] != lang and post["pair"] in by_slug:
+                continue
+            tag = f' <span class="meta">[{post["lang"]}]</span>' if post["lang"] != lang else ""
+            items.append(
+                f'<li><span class="meta mono">{post["date"]}</span> — '
+                f'<a href="/blog/{post["slug"]}.html">{H.escape(post["title"])}</a>{tag}</li>'
+            )
+        return chr(10).join(items)
+
     for post in posts:
         body_html = markdown.markdown(post["body_md"], extensions=["extra", "fenced_code"])
         back = "/ru/blog/" if post["lang"] == "ru" else "/blog/"
-        alt_back = "/blog/" if post["lang"] == "ru" else "/ru/blog/"
+        pair = by_slug.get(post["pair"])
+        alt_href = (f"/blog/{pair['slug']}.html" if pair
+                    else ("/blog/" if post["lang"] == "ru" else "/ru/blog/"))
         body = f"""
 <p class="prompt">cat blog/{H.escape(post['slug'])}.md</p>
 <h1>{H.escape(post['title'])}</h1>
@@ -341,27 +360,23 @@ def blog_pages() -> None:
 """
         render(OUT / "blog" / f"{post['slug']}.html",
                lang=post["lang"], active="blog", title=post["title"],
-               description=post["title"], body=body, alt_href=alt_back)
-        items.append(
-            f'<li><span class="meta mono">{post["date"]}</span> — '
-            f'<a href="/blog/{post["slug"]}.html">{H.escape(post["title"])}</a>'
-            f' <span class="meta">[{post["lang"]}]</span></li>'
-        )
-    listing = chr(10).join(items)
+               description=post["title"], body=body, alt_href=alt_href)
+    ru_listing = listing_for("ru")
+    en_listing = listing_for("en")
     index_ru = f"""
 <p class="prompt">ls blog/ --sort=date</p>
 <h1>Блог</h1>
-<p class="tagline">Нерегулярные заметки: AI, автоматизация, инженерное. RU/EN вперемешку.</p>
+<p class="tagline">Нерегулярные заметки: AI, автоматизация, инженерное.</p>
 <ul class="plain">
-{listing if items else "<p class='meta'>Пока пусто. Скоро будет.</p>"}
+{ru_listing or "<p class='meta'>Пока пусто. Скоро будет.</p>"}
 </ul>
 """
     index_en = f"""
 <p class="prompt">ls blog/ --sort=date</p>
 <h1>Blog</h1>
-<p class="tagline">Irregular notes on AI, automation and engineering. A mix of RU/EN.</p>
+<p class="tagline">Irregular notes on AI, automation and engineering.</p>
 <ul class="plain">
-{listing if items else "<p class='meta'>Nothing here yet. Soon.</p>"}
+{en_listing or "<p class='meta'>Nothing here yet. Soon.</p>"}
 </ul>
 """
     render(OUT / "blog" / "index.html", lang="en", active="blog",

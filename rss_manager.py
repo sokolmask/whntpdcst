@@ -12,7 +12,7 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 from xml.dom import minidom
 
-FEED_PATH = Path("/opt/data/podcast/feed.xml")
+FEED_PATH = Path(os.environ.get("PODCAST_DATA_DIR", "/opt/data/podcast")) / "feed.xml"
 BASE_URL = "https://whntpdcst.com"
 MAX_EPISODES = 20
 

@@ -23,6 +23,9 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
+import httpx
+import yaml
+
 from fastapi import Depends, FastAPI, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
@@ -40,6 +43,7 @@ EXTRA_SOURCES_PATH = Path("/opt/data/podcast/sources.extra.yaml")
 COVERED_PATH = Path("/opt/data/podcast/covered.json")
 GEN_LOG = Path("/opt/data/podcast/logs/generate.log")
 BLOG_DIR = Path("/opt/data/podcast/blog")
+SITE_DIR = Path("/opt/data/podcast/site")
 SITE_LOG = Path("/opt/data/podcast/logs/site.log")
 ITUNES = "{" + rm.ITUNES_NS + "}"
 
@@ -186,6 +190,58 @@ def _safe_post_path(slug: str) -> Path:
     return BLOG_DIR / f"{slug}.md"
 
 
+def _post_parts(raw: str) -> tuple[dict, str]:
+    """Split a post into (frontmatter dict, markdown body)."""
+    m = re.match(r"^---\s*\n(.*?)\n---\s*\n(.*)$", raw, re.S)
+    if not m:
+        return {}, raw
+    try:
+        return (yaml.safe_load(m.group(1)) or {}), m.group(2)
+    except Exception:
+        return {}, raw
+
+
+def _site_episode_urls() -> set[str]:
+    """Episode mp3 URLs present on the built podcast pages."""
+    urls: set[str] = set()
+    for f in [SITE_DIR / "podcast" / "index.html", SITE_DIR / "ru" / "podcast" / "index.html"]:
+        if f.exists():
+            urls |= set(re.findall(r'<audio[^>]+src="([^"]+)"', f.read_text(encoding="utf-8")))
+    return urls
+
+
+def _llm_translate(title: str, body: str, dst_lang: str) -> tuple[str, str]:
+    """Translate a post via OpenRouter. Returns (title, body)."""
+    key = os.environ.get("OPENROUTER_API_KEY", "")
+    if not key:
+        raise HTTPException(500, "OPENROUTER_API_KEY не задан")
+    lang_name = {"en": "English", "ru": "Russian"}[dst_lang]
+    prompt = (
+        f"Translate this blog post into {lang_name}. Preserve the markdown structure exactly: "
+        "keep code blocks, inline code and URLs unchanged, translate prose and link texts. "
+        "Keep the author's tone (light, technical, first person). "
+        "Reply with the translated title on the first line, then a line containing only ---, "
+        f"then the translated markdown body. No commentary.\n\nTITLE: {title}\n\nBODY:\n{body}"
+    )
+    resp = httpx.post(
+        "https://openrouter.ai/api/v1/chat/completions",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"model": "google/gemini-2.5-flash", "temperature": 0.2,
+              "max_tokens": 8192,
+              "messages": [{"role": "user", "content": prompt}]},
+        timeout=180,
+    )
+    resp.raise_for_status()
+    content = resp.json()["choices"][0]["message"]["content"].strip()
+    lines = content.splitlines()
+    t_title = re.sub(r"^TITLE:\s*", "", lines[0]).strip()
+    try:
+        sep = next(i for i, ln in enumerate(lines) if ln.strip() == "---")
+    except StopIteration:
+        raise HTTPException(502, "LLM вернул перевод в неожиданном формате")
+    return t_title, "\n".join(lines[sep + 1:]).strip() + "\n"
+
+
 def _gen_running() -> bool:
     return _gen_proc is not None and _gen_proc.poll() is None
 
@@ -274,11 +330,13 @@ def _render(flash: str = "") -> str:
     eps = _published()
     published_files = {e["file"] for e in eps}
     analytics = _episode_analytics()
+    site_urls = _site_episode_urls()
 
     rows = []
     for e in eps:
         t, d, u = html.escape(e["title"]), html.escape(e["description"]), html.escape(e["url"])
         a = analytics.get(e["file"], {"requests": 0, "ips": set()})
+        on_site = "✅" if e["url"] in site_urls else "⚠️ нет"
         rows.append(f"""<tr>
 <td>{e['number']}</td>
 <td><a href="{u}">{t}</a><br>
@@ -293,6 +351,7 @@ def _render(flash: str = "") -> str:
 <td>{_fmt_dur(e['duration'])}</td>
 <td>{a['requests']}</td>
 <td>{len(a['ips'])}</td>
+<td>{on_site}</td>
 <td><form class="inline" method="post" action="/unpublish"
      onsubmit="return confirm('Снять «{t}» с публикации? Файл останется.')">
 <input type="hidden" name="url" value="{u}">
@@ -300,7 +359,7 @@ def _render(flash: str = "") -> str:
 </tr>""")
     episodes_html = (
         "<table><tr><th>№</th><th>Эпизод</th><th>Дата</th><th>Длит.</th>"
-        "<th>Запросов</th><th>IP</th><th></th></tr>"
+        "<th>Запросов</th><th>IP</th><th>Сайт</th><th></th></tr>"
         + "".join(rows) + "</table>" if rows else "<p class='muted'>Фид пуст.</p>"
     )
 
@@ -396,14 +455,26 @@ hackernews:
     if BLOG_DIR.exists():
         for p in sorted(BLOG_DIR.glob("*.md"), reverse=True):
             slug = html.escape(p.stem)
-            content = html.escape(p.read_text(encoding="utf-8"))
-            post_blocks.append(f"""<details><summary class="mono">{slug}.md
+            raw = p.read_text(encoding="utf-8")
+            content = html.escape(raw)
+            meta, _ = _post_parts(raw)
+            lang = str(meta.get("lang", "ru")).lower()
+            pair = str(meta.get("pair", ""))
+            dst = "RU" if lang == "en" else "EN"
+            translate_html = (
+                f'<span class="muted">перевод: {html.escape(pair)}.md</span>' if pair else
+                f"""<form class="inline" method="post" action="/blog-translate">
+<input type="hidden" name="slug" value="{slug}">
+<button type="submit">Перевести на {dst}</button></form>"""
+            )
+            post_blocks.append(f"""<details><summary class="mono">{slug}.md [{lang}]
 <a href="{rm.BASE_URL}/blog/{slug}.html">→ на сайте</a></summary>
 <form method="post" action="/blog-save">
 <input type="hidden" name="slug" value="{slug}">
 <textarea class="yaml" name="content" rows="14">{content}</textarea>
 <button type="submit">Сохранить и пересобрать</button>
 </form>
+{translate_html}
 <form class="inline" method="post" action="/blog-delete"
       onsubmit="return confirm('Удалить пост {slug}?')">
 <input type="hidden" name="slug" value="{slug}">
@@ -557,6 +628,34 @@ def blog_delete(slug: str = Form(...)):
 @app.post("/site-rebuild")
 def site_rebuild():
     return _redirect(_rebuild_site().capitalize())
+
+
+@app.post("/blog-translate")
+def blog_translate(slug: str = Form(...)):
+    src_path = _safe_post_path(slug.strip())
+    if not src_path.exists():
+        raise HTTPException(404, f"Пост не найден: {slug}")
+    meta, body = _post_parts(src_path.read_text(encoding="utf-8"))
+    if not meta:
+        return _redirect(f"У поста {slug} нет frontmatter — не перевожу")
+    src_lang = str(meta.get("lang", "ru")).lower()
+    dst_lang = "en" if src_lang != "en" else "ru"
+    pair_slug = str(meta.get("pair", ""))
+    if pair_slug and (BLOG_DIR / f"{pair_slug}.md").exists():
+        return _redirect(f"Перевод уже есть: {pair_slug}.md — удали его, если нужен свежий")
+    dst_slug = re.sub(r"-(ru|en)$", "", slug) + f"-{dst_lang}"
+
+    t_title, t_body = _llm_translate(str(meta.get("title", slug)), body, dst_lang)
+
+    dst_meta = {"title": t_title, "date": meta.get("date", ""), "lang": dst_lang, "pair": slug}
+    fm = yaml.safe_dump(dst_meta, allow_unicode=True, sort_keys=False).strip()
+    (BLOG_DIR / f"{dst_slug}.md").write_text(f"---\n{fm}\n---\n\n{t_body}", encoding="utf-8")
+
+    meta["pair"] = dst_slug
+    src_fm = yaml.safe_dump(meta, allow_unicode=True, sort_keys=False).strip()
+    src_path.write_text(f"---\n{src_fm}\n---\n\n{body.lstrip()}", encoding="utf-8")
+
+    return _redirect(f"Переведено: {dst_slug}.md ({dst_lang}), {_rebuild_site()}")
 
 
 @app.post("/sources-extra")

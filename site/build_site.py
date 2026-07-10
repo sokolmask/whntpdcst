@@ -332,6 +332,14 @@ def blog_pages() -> None:
     posts = load_posts()
     by_slug = {p["slug"]: p for p in posts}
 
+    # Drop orphan pages of deleted/renamed posts
+    blog_out = OUT / "blog"
+    if blog_out.exists():
+        for f in blog_out.glob("*.html"):
+            if f.stem not in by_slug and f.name != "index.html":
+                f.unlink()
+                print(f"[site] удалён осиротевший blog/{f.name}")
+
     def listing_for(lang: str) -> str:
         # Own-language posts + other-language posts without a translation
         items = []

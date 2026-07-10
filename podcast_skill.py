@@ -184,7 +184,8 @@ SEGMENT_PROMPT = """Ты пишешь фрагмент сценария подк
 Стиль: как NotebookLM Audio Overview — живой, естественный разговор, не лекция. Ведущие перебивают друг друга, \
 уточняют, иногда удивляются. Без формальных переходов типа «теперь поговорим о...».
 
-Это ОДИН ФРАГМЕНТ длинного выпуска — разговор по одной теме, МИНИМУМ {words} слов диалога. \
+Это ОДИН ФРАГМЕНТ длинного выпуска — разговор по одной теме, примерно {words} слов диалога. \
+Не растекайся: это один фрагмент из многих, уложись в объём. \
 Разбирайте тему глубоко: что произошло (конкретные факты, цифры, названия) → почему это важно → \
 что это значит на практике для отрасли и разработчиков → где подводные камни.
 
@@ -211,7 +212,7 @@ FINAL_SEGMENT_PROMPT = """Ты пишешь финальный фрагмент 
 Стиль: как NotebookLM Audio Overview — живой, естественный разговор, не лекция.
 
 Это КОНЕЦ выпуска. Сначала живой блиц по коротким новостям ниже (одна-две реплики на новость), \
-затем один короткий вывод недели — и всё, без долгих прощаний.
+затем один короткий вывод недели — и всё, без долгих прощаний. Весь финал — примерно 250-300 слов.
 {continuity}
 Правила:
 - Только живой разговор — никаких списков и буллетов в репликах
@@ -222,6 +223,14 @@ FINAL_SEGMENT_PROMPT = """Ты пишешь финальный фрагмент 
 
 Блиц-новости:
 {korotko}"""
+
+CONDENSE_PROMPT = """Сократи фрагмент диалога подкаста примерно до {words} слов.
+Сохрани формат реплик АЛЕКС:/САША: (каждая на новой строке), самые важные факты, цифры и живость разговора.
+Убирай второстепенные ответвления и повторы, ничего нового не добавляй.
+Первая и последняя реплики должны остаться связующими — фрагмент стоит в середине выпуска.
+
+Фрагмент:
+{segment}"""
 
 
 DIGEST_HTML_TEMPLATE = """<!DOCTYPE html>
@@ -728,11 +737,15 @@ def split_digest_sections(digest: str) -> tuple[list[tuple[str, str]], str]:
     return topics, korotko
 
 
+def _word_count(text: str) -> int:
+    return len(re.findall(r"\S+", text))
+
+
 def generate_script_chunked(digest: str, minutes: int) -> str:
     """Long episodes: one LLM call per digest topic + a finale.
     A single call reliably undershoots length targets past ~12 minutes."""
     topics, korotko = split_digest_sections(digest)
-    words_per_topic = max(int(minutes * 160 / (len(topics) + 1) * 1.3), 250)
+    words_per_topic = max(int(minutes * 160 / (len(topics) + 1)), 250)
     print(f"[LLM] Длинный выпуск: {len(topics)} тем по ~{words_per_topic} слов + финал...")
     segments, tail = [], ""
     for i, (title, body) in enumerate(topics):
@@ -762,8 +775,26 @@ def generate_script_chunked(digest: str, minutes: int) -> str:
         ).strip()
         segments.append(final)
         print(f"[LLM]   финал — {len(final)} символов")
+
+    # Gemini tends to overshoot per-segment word targets ~2x; condense
+    # proportionally when the total is clearly past the requested duration
+    target_words = minutes * 160
+    total_words = sum(_word_count(s) for s in segments)
+    if total_words > target_words * 1.2:
+        ratio = target_words / total_words
+        print(f"[LLM] Сценарий {total_words} слов при цели {target_words} — ужимаю сегменты (x{ratio:.2f})...")
+        for i, seg in enumerate(segments):
+            want = max(int(_word_count(seg) * ratio), 150)
+            condensed = call_llm(
+                CONDENSE_PROMPT.format(words=want, segment=seg), temperature=0.4
+            ).strip()
+            # keep the original if condensing broke the dialogue format
+            if re.search(r"^(АЛЕКС|САША):", condensed, re.MULTILINE):
+                segments[i] = condensed
+            print(f"[LLM]   сегмент {i + 1}: {_word_count(seg)} → {_word_count(segments[i])} слов")
+
     script = "\n".join(segments)
-    print(f"[LLM] Сценарий готов: {len(script)} символов")
+    print(f"[LLM] Сценарий готов: {len(script)} символов, ~{_word_count(script)} слов")
     return script
 
 

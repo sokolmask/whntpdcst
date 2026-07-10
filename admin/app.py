@@ -39,6 +39,8 @@ SOURCES_PATH = SKILL_DIR / "sources.yaml"
 EXTRA_SOURCES_PATH = Path("/opt/data/podcast/sources.extra.yaml")
 COVERED_PATH = Path("/opt/data/podcast/covered.json")
 GEN_LOG = Path("/opt/data/podcast/logs/generate.log")
+BLOG_DIR = Path("/opt/data/podcast/blog")
+SITE_LOG = Path("/opt/data/podcast/logs/site.log")
 ITUNES = "{" + rm.ITUNES_NS + "}"
 
 # Single uvicorn worker → a module global is enough to track the one allowed run
@@ -167,6 +169,23 @@ def _merge_covered(mp3_path: Path) -> int:
     return len(items)
 
 
+def _rebuild_site() -> str:
+    """Run the static site generator; return a short status string."""
+    SITE_LOG.parent.mkdir(parents=True, exist_ok=True)
+    result = subprocess.run(
+        [sys.executable, str(SKILL_DIR / "site" / "build_site.py")],
+        capture_output=True, timeout=120, text=True,
+    )
+    SITE_LOG.write_text((result.stdout or "") + (result.stderr or ""), encoding="utf-8")
+    return "сайт пересобран" if result.returncode == 0 else "ОШИБКА сборки сайта (см. лог)"
+
+
+def _safe_post_path(slug: str) -> Path:
+    if not re.fullmatch(r"[\w-]{1,80}", slug, flags=re.UNICODE):
+        raise HTTPException(400, f"Недопустимое имя поста: {slug}")
+    return BLOG_DIR / f"{slug}.md"
+
+
 def _gen_running() -> bool:
     return _gen_proc is not None and _gen_proc.poll() is None
 
@@ -231,6 +250,8 @@ Artist: {author} · метаданные канала правятся в rss_ma
 {generation}
 <h2>Источники</h2>
 {sources}
+<h2>Блог и сайт</h2>
+{blog}
 <h2>Загрузить запись</h2>
 <form method="post" action="/upload" enctype="multipart/form-data">
 <table>
@@ -370,6 +391,43 @@ hackernews:
 <p class="muted">В базе освещённого: {covered_count} материалов (covered.json) —
 уже попавшее в опубликованные выпуски в новых только упоминается одной фразой.</p>"""
 
+    # Blog & site section
+    post_blocks = []
+    if BLOG_DIR.exists():
+        for p in sorted(BLOG_DIR.glob("*.md"), reverse=True):
+            slug = html.escape(p.stem)
+            content = html.escape(p.read_text(encoding="utf-8"))
+            post_blocks.append(f"""<details><summary class="mono">{slug}.md
+<a href="{rm.BASE_URL}/blog/{slug}.html">→ на сайте</a></summary>
+<form method="post" action="/blog-save">
+<input type="hidden" name="slug" value="{slug}">
+<textarea class="yaml" name="content" rows="14">{content}</textarea>
+<button type="submit">Сохранить и пересобрать</button>
+</form>
+<form class="inline" method="post" action="/blog-delete"
+      onsubmit="return confirm('Удалить пост {slug}?')">
+<input type="hidden" name="slug" value="{slug}">
+<button class="danger" type="submit">Удалить</button></form>
+</details>""")
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    new_post_tpl = html.escape(
+        f"---\ntitle: Заголовок\ndate: {today_str}\nlang: ru\ndraft: false\n---\n\nТекст поста в markdown.\n"
+    )
+    site_tail = html.escape(
+        SITE_LOG.read_text(encoding="utf-8", errors="replace")[-800:]
+    ) if SITE_LOG.exists() else ""
+    blog_html = f"""<p class="muted">Сайт: <a href="{rm.BASE_URL}/">{rm.BASE_URL}</a> ·
+посты в /opt/data/podcast/blog/, сайт пересобирается при сохранении и публикации эпизодов</p>
+<form class="inline" method="post" action="/site-rebuild"><button type="submit">Пересобрать сайт</button></form>
+{"".join(post_blocks) if post_blocks else "<p class='muted'>Постов пока нет.</p>"}
+<details><summary>Новый пост</summary>
+<form method="post" action="/blog-save">
+<p>Имя файла (slug, латиница/цифры/дефис): <input type="text" name="slug" placeholder="my-first-post" required></p>
+<textarea class="yaml" name="content" rows="12">{new_post_tpl}</textarea>
+<button type="submit">Создать и пересобрать</button>
+</form></details>
+{f'<details><summary class="muted">лог сборки</summary><pre class="log">{site_tail}</pre></details>' if site_tail else ''}"""
+
     digest_links = [
         f'<li>{p.stem}: <a href="{rm.BASE_URL}/digests/{p.stem}.html">HTML</a> · '
         f'<a href="{rm.BASE_URL}/digests/{p.stem}.md">MD</a></li>'
@@ -388,6 +446,7 @@ hackernews:
         files=files_html,
         generation=generation_html,
         sources=sources_html,
+        blog=blog_html,
         next_title=f"Выпуск {next_num} — {today}",
         digests=digests_html,
     )
@@ -414,7 +473,7 @@ def unpublish(url: str = Form(...)):
     title = item.findtext("title") or url
     channel.remove(item)
     _save_feed(rss)
-    return _redirect(f"Снят с публикации: {title}")
+    return _redirect(f"Снят с публикации: {title}, {_rebuild_site()}")
 
 
 @app.post("/edit")
@@ -431,7 +490,7 @@ def edit(url: str = Form(...), title: str = Form(...), description: str = Form(.
         if el is not None:
             el.text = value
     _save_feed(rss)
-    return _redirect(f"Обновлено: {title}")
+    return _redirect(f"Обновлено: {title}, {_rebuild_site()}")
 
 
 @app.post("/publish")
@@ -448,7 +507,7 @@ def publish(filename: str = Form(...), title: str = Form(...), description: str 
     )
     n_covered = _merge_covered(path)
     extra = f" (+{n_covered} материалов в базу освещённого)" if n_covered else ""
-    return _redirect(f"Опубликован: {title}{extra}")
+    return _redirect(f"Опубликован: {title}{extra}, {_rebuild_site()}")
 
 
 @app.get("/audio/{filename}")
@@ -476,6 +535,28 @@ def generate(days: str = Form("7")):
             stdout=log_f, stderr=subprocess.STDOUT, cwd=str(SKILL_DIR),
         )
     return _redirect(f"Генерация запущена (материалы за {days_n} дней)")
+
+
+@app.post("/blog-save")
+def blog_save(slug: str = Form(...), content: str = Form(...)):
+    path = _safe_post_path(slug.strip())
+    BLOG_DIR.mkdir(parents=True, exist_ok=True)
+    path.write_text(content.replace("\r\n", "\n"), encoding="utf-8")
+    return _redirect(f"Пост {path.name} сохранён, {_rebuild_site()}")
+
+
+@app.post("/blog-delete")
+def blog_delete(slug: str = Form(...)):
+    path = _safe_post_path(slug.strip())
+    if not path.exists():
+        raise HTTPException(404, f"Пост не найден: {slug}")
+    path.unlink()
+    return _redirect(f"Пост {slug} удалён, {_rebuild_site()}")
+
+
+@app.post("/site-rebuild")
+def site_rebuild():
+    return _redirect(_rebuild_site().capitalize())
 
 
 @app.post("/sources-extra")

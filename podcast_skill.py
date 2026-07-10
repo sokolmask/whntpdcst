@@ -1092,6 +1092,14 @@ def main():
             mark_covered(new_items, today)
         except Exception as e:
             print(f"[RSS] ошибка обновления: {e}")
+        try:
+            subprocess.run(
+                [sys.executable, str(Path(__file__).parent / "site" / "build_site.py")],
+                capture_output=True, timeout=120, check=True,
+            )
+            print("[site] сайт пересобран")
+        except Exception as e:
+            print(f"[site] пересборка не удалась: {e}")
 
     print(f"\n=== Готово ===")
     print(f"MP3:     {mp3_path}")

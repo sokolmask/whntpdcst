@@ -42,8 +42,7 @@ LINKS = {
     "github": "https://github.com/sokolmask",
     "email": "podcast@whntpdcst.com",
     "rss": f"{BASE_URL}/feed.xml",
-    # Apple Podcasts show URL — вставить, когда будет под рукой
-    "apple": "",
+    "apple": "https://podcasts.apple.com/podcast/id6787594775",
 }
 
 CSS = """

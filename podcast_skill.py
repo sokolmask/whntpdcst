@@ -176,6 +176,53 @@ SCRIPT_FOCUS_NOTE = """
 остальные обсуждайте короче.
 """
 
+SEGMENT_PROMPT = """Ты пишешь фрагмент сценария подкаста «Что нового в AI» с двумя ведущими.
+
+Ведущий АЛЕКС — мужчина, аналитичный, лаконичный, любит конкретные факты и цифры, задаёт острые вопросы.
+Ведущий САША — женщина, тёплая, связывает темы, делает практические выводы, говорит живо и понятно.
+
+Стиль: как NotebookLM Audio Overview — живой, естественный разговор, не лекция. Ведущие перебивают друг друга, \
+уточняют, иногда удивляются. Без формальных переходов типа «теперь поговорим о...».
+
+Это ОДИН ФРАГМЕНТ длинного выпуска — разговор по одной теме, МИНИМУМ {words} слов диалога. \
+Разбирайте тему глубоко: что произошло (конкретные факты, цифры, названия) → почему это важно → \
+что это значит на практике для отрасли и разработчиков → где подводные камни.
+
+{position}
+{continuity}
+Правила:
+- Только живой разговор — никаких списков и буллетов в репликах
+- НЕ завершай выпуск: не прощайся, не подводи итоги недели — после этой темы разговор продолжится
+- Последняя реплика фрагмента — естественная точка, после которой можно перейти к новой теме
+- Формат строго (каждая реплика на новой строке):
+
+АЛЕКС: текст реплики
+САША: текст реплики
+
+Тема фрагмента:
+## {title}
+{body}"""
+
+FINAL_SEGMENT_PROMPT = """Ты пишешь финальный фрагмент сценария подкаста «Что нового в AI» с двумя ведущими.
+
+Ведущий АЛЕКС — мужчина, аналитичный, лаконичный, любит конкретные факты и цифры, задаёт острые вопросы.
+Ведущий САША — женщина, тёплая, связывает темы, делает практические выводы, говорит живо и понятно.
+
+Стиль: как NotebookLM Audio Overview — живой, естественный разговор, не лекция.
+
+Это КОНЕЦ выпуска. Сначала живой блиц по коротким новостям ниже (одна-две реплики на новость), \
+затем один короткий вывод недели — и всё, без долгих прощаний.
+{continuity}
+Правила:
+- Только живой разговор — никаких списков и буллетов в репликах
+- Формат строго (каждая реплика на новой строке):
+
+АЛЕКС: текст реплики
+САША: текст реплики
+
+Блиц-новости:
+{korotko}"""
+
 
 DIGEST_HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="ru">
@@ -665,9 +712,66 @@ def generate_digest(context: str, date: str, focus: str | None = None) -> str:
     return digest
 
 
+def split_digest_sections(digest: str) -> tuple[list[tuple[str, str]], str]:
+    """Split digest MD into topic sections [(title, body), ...] + «Коротко» body."""
+    parts = re.split(r"^##\s+", digest, flags=re.MULTILINE)
+    topics, korotko = [], ""
+    for part in parts[1:]:
+        title, _, body = part.partition("\n")
+        title, body = title.strip(), body.strip()
+        if title.startswith("Источники"):
+            continue
+        if title.startswith("Коротко"):
+            korotko = body
+        else:
+            topics.append((title, body))
+    return topics, korotko
+
+
+def generate_script_chunked(digest: str, minutes: int) -> str:
+    """Long episodes: one LLM call per digest topic + a finale.
+    A single call reliably undershoots length targets past ~12 minutes."""
+    topics, korotko = split_digest_sections(digest)
+    words_per_topic = max(int(minutes * 160 / (len(topics) + 1) * 1.3), 250)
+    print(f"[LLM] Длинный выпуск: {len(topics)} тем по ~{words_per_topic} слов + финал...")
+    segments, tail = [], ""
+    for i, (title, body) in enumerate(topics):
+        position = (
+            "Это самое начало выпуска — начинай сразу с сути темы, без приветствий и анонсов."
+            if i == 0 else
+            "Это середина выпуска — разговор уже идёт. Продолжай естественно, без «а теперь поговорим о»."
+        )
+        continuity = (
+            f"\nПоследние реплики предыдущего фрагмента (не повторять, просто продолжить после них):\n{tail}\n"
+            if tail else ""
+        )
+        seg = call_llm(
+            SEGMENT_PROMPT.format(words=words_per_topic, position=position,
+                                  continuity=continuity, title=title, body=body),
+            temperature=0.8,
+        ).strip()
+        segments.append(seg)
+        seg_lines = [l for l in seg.splitlines() if l.strip()]
+        tail = "\n".join(seg_lines[-2:])
+        print(f"[LLM]   {i + 1}/{len(topics)} «{title}» — {len(seg)} символов")
+    if korotko:
+        continuity = f"\nПоследние реплики перед финалом (не повторять):\n{tail}\n" if tail else ""
+        final = call_llm(
+            FINAL_SEGMENT_PROMPT.format(continuity=continuity, korotko=korotko),
+            temperature=0.8,
+        ).strip()
+        segments.append(final)
+        print(f"[LLM]   финал — {len(final)} символов")
+    script = "\n".join(segments)
+    print(f"[LLM] Сценарий готов: {len(script)} символов")
+    return script
+
+
 def generate_script(digest: str, minutes: int | None = None, focus: str | None = None) -> str:
     """Stage 2: digest → dialogue script. Length scales with topic count,
     or is pinned by an explicit target duration."""
+    if minutes and minutes >= 15 and split_digest_sections(digest)[0]:
+        return generate_script_chunked(digest, minutes)
     n_topics = len(re.findall(r"^##\s+(?!Коротко|Источники)", digest, flags=re.MULTILINE)) or 5
     if minutes:
         words_lo = minutes * 145
@@ -965,57 +1069,75 @@ def main():
                         help="Тематический фокус выпуска (свободный текст для промптов)")
     parser.add_argument("--minutes", type=int, default=None,
                         help="Целевая длительность эпизода в минутах (иначе — от числа тем)")
+    parser.add_argument("--digest-file", type=str, default=None,
+                        help="Готовый дайджест (.md): пропустить сбор источников и этап 1, "
+                             "items/sources взять из манифеста того же прогона")
     args = parser.parse_args()
 
     today = datetime.now().strftime("%Y-%m-%d")
     print(f"=== Подкаст 'Что нового в AI' — {today} (за {args.days} дней) ===")
 
-    cfg = load_sources()
-    channels = [
-        (c["handle"], c.get("category", ""))
-        for c in cfg.get("youtube", {}).get("channels", [])
-        if c.get("enabled", True)
-    ]
-
-    covered = load_covered()
     new_items: dict[str, str] = {}
-    old_mentions: list[str] = []
-    if covered:
-        print(f"[covered] В базе освещённого: {len(covered)} материалов")
+    sources: list[str] = []
+    digest = None
+    if args.digest_file:
+        digest_src = Path(args.digest_file)
+        digest = digest_src.read_text(encoding="utf-8")
+        man_path = EPISODES_DIR / f"{digest_src.stem}.items.json"
+        if man_path.exists():
+            man = json.loads(man_path.read_text(encoding="utf-8"))
+            new_items = man.get("items", {})
+            sources = man.get("sources", [])
+        else:
+            print(f"[digest-file] ВНИМАНИЕ: манифест {man_path} не найден — items/sources пустые")
+        print(f"[digest-file] Дайджест из {digest_src}: {len(digest)} символов, "
+              f"items: {len(new_items)}, sources: {len(sources)}")
+    else:
+        cfg = load_sources()
+        channels = [
+            (c["handle"], c.get("category", ""))
+            for c in cfg.get("youtube", {}).get("channels", [])
+            if c.get("enabled", True)
+        ]
 
-    # 1. Fetch YouTube transcripts
-    yt_context, yt_sources = fetch_youtube_context(
-        args.days, channels, covered, new_items, old_mentions
-    )
+        covered = load_covered()
+        old_mentions: list[str] = []
+        if covered:
+            print(f"[covered] В базе освещённого: {len(covered)} материалов")
 
-    # 2. Fetch web sources
-    web_context, web_sources = fetch_web_context(
-        args.days, cfg.get("hackernews", {}), cfg.get("huggingface_papers", {}),
-        covered, new_items, old_mentions,
-    )
-
-    # 2b. Fetch Telegram channels (user session; includes private subscriptions)
-    tg_context, tg_sources = fetch_telegram_context(
-        args.days, cfg.get("telegram", {}), covered, new_items, old_mentions
-    )
-
-    # 3. Build combined context
-    context_parts = list(filter(None, [yt_context, web_context, tg_context]))
-    if not context_parts:
-        print("ОШИБКА: нет материалов для подкаста")
-        sys.exit(1)
-
-    if old_mentions:
-        context_parts.append(
-            "## Уже освещалось в прошлых выпусках\n"
-            "(заново не разбирать; можно кратко сослаться, если связано с новой темой)\n"
-            + "\n".join(f"- {m}" for m in old_mentions)
+        # 1. Fetch YouTube transcripts
+        yt_context, yt_sources = fetch_youtube_context(
+            args.days, channels, covered, new_items, old_mentions
         )
-        print(f"[covered] Пропущено как уже освещённое: {len(old_mentions)}")
 
-    context = "\n\n".join(context_parts)
-    sources = yt_sources + web_sources + tg_sources
-    print(f"[context] Всего символов: {len(context)}, источников: {len(sources)}, новых материалов: {len(new_items)}")
+        # 2. Fetch web sources
+        web_context, web_sources = fetch_web_context(
+            args.days, cfg.get("hackernews", {}), cfg.get("huggingface_papers", {}),
+            covered, new_items, old_mentions,
+        )
+
+        # 2b. Fetch Telegram channels (user session; includes private subscriptions)
+        tg_context, tg_sources = fetch_telegram_context(
+            args.days, cfg.get("telegram", {}), covered, new_items, old_mentions
+        )
+
+        # 3. Build combined context
+        context_parts = list(filter(None, [yt_context, web_context, tg_context]))
+        if not context_parts:
+            print("ОШИБКА: нет материалов для подкаста")
+            sys.exit(1)
+
+        if old_mentions:
+            context_parts.append(
+                "## Уже освещалось в прошлых выпусках\n"
+                "(заново не разбирать; можно кратко сослаться, если связано с новой темой)\n"
+                + "\n".join(f"- {m}" for m in old_mentions)
+            )
+            print(f"[covered] Пропущено как уже освещённое: {len(old_mentions)}")
+
+        context = "\n\n".join(context_parts)
+        sources = yt_sources + web_sources + tg_sources
+        print(f"[context] Всего символов: {len(context)}, источников: {len(sources)}, новых материалов: {len(new_items)}")
 
     # Output stem: never overwrite same-day artifacts (published episode/digest
     # already reference them, and Cloudflare caches mp3 for 24h)
@@ -1025,8 +1147,9 @@ def main():
         print(f"[out] Артефакты за {today} уже есть → пишу как {stem}.*")
 
     # 4. Stage 1: digest
-    digest = generate_digest(context, today, focus=args.focus)
-    if sources:
+    if digest is None:
+        digest = generate_digest(context, today, focus=args.focus)
+    if sources and "## Источники выпуска" not in digest:
         digest += "\n\n## Источники выпуска\n" + "\n".join(f"- {s}" for s in sources)
 
     DIGESTS_DIR.mkdir(parents=True, exist_ok=True)

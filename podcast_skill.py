@@ -745,7 +745,8 @@ def generate_script_chunked(digest: str, minutes: int) -> str:
     """Long episodes: one LLM call per digest topic + a finale.
     A single call reliably undershoots length targets past ~12 minutes."""
     topics, korotko = split_digest_sections(digest)
-    words_per_topic = max(int(minutes * 160 / (len(topics) + 1)), 250)
+    # Gemini TTS speaks Russian dialogue at ~145 wpm (measured on episode 3)
+    words_per_topic = max(int(minutes * 145 / (len(topics) + 1)), 250)
     print(f"[LLM] Длинный выпуск: {len(topics)} тем по ~{words_per_topic} слов + финал...")
     segments, tail = [], ""
     for i, (title, body) in enumerate(topics):
@@ -778,7 +779,7 @@ def generate_script_chunked(digest: str, minutes: int) -> str:
 
     # Gemini tends to overshoot per-segment word targets ~2x; condense
     # proportionally when the total is clearly past the requested duration
-    target_words = minutes * 160
+    target_words = minutes * 145
     total_words = sum(_word_count(s) for s in segments)
     if total_words > target_words * 1.2:
         ratio = target_words / total_words

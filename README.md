@@ -48,9 +48,61 @@ OPENROUTER_API_KEY=...
 ./setup-carbon.sh
 ```
 
-После этого — `git push` деплоит автоматически через GitHub Actions.
+**GitHub Actions деплой НЕ работает и работать не будет**: carbon за NAT
+домашнего провайдера без port forwarding, runner GitHub не достучится до SSH
+(все прогоны workflow падают с `dial tcp :22: i/o timeout`). Workflow остался
+декоративным. **Каждый пуш в main деплоится руками.**
 
-Подкаст раздаётся через nginx + Cloudflare Tunnel (без port forwarding на роутере).
+### Стандартный деплой
+
+```bash
+# локально
+git push origin main
+
+# на carbon
+ssh sokolmask@192.168.1.124
+cd ~/hermes-data/skills/podcast
+git pull origin main
+```
+
+Дальше — по тому, что менялось (репо смонтирован в контейнеры как
+`/opt/data/skills/podcast`, поэтому многое подхватывается без пересборки):
+
+| Что менялось | Что сделать после `git pull` |
+|---|---|
+| `podcast_skill.py`, `rss_manager.py`, `site/*`, `sources.yaml` | ничего — файлы монтируются, каждый запуск читает свежие |
+| `admin/app.py` | `docker compose -f docker/docker-compose.yml restart podcast-admin` (uvicorn держит код в памяти) |
+| `docker/nginx.conf` | `docker compose -f docker/docker-compose.yml restart podcast-static` |
+| `docker/admin.Dockerfile` (зависимости админки) | `cd docker && docker compose up -d --build` |
+| `docker/docker-compose.yml` | `cd docker && docker compose up -d` |
+| `.env` (hermes-agent/.env) | `docker compose up -d --force-recreate podcast-admin` — простой restart env НЕ подтягивает |
+| `requirements.txt` (для hermes) | `docker exec hermes uv pip install -r /opt/data/skills/podcast/requirements.txt` — pip-пакеты hermes НЕ переживают recreate контейнера |
+| `cover.jpg` | `cp cover.jpg ~/hermes-data/podcast/cover.jpg` |
+| контент сайта (лендинг/страницы) | пересобрать сайт (ниже) |
+
+### Пересборка сайта
+
+Сайт статический, собирается в `/opt/data/podcast/site/`:
+
+```bash
+docker exec podcast-admin python /opt/data/skills/podcast/site/build_site.py
+```
+
+или кнопка «Пересобрать сайт» в админке. Автоматически пересобирается при
+publish/unpublish/правке эпизода и сохранении/удалении/переводе поста.
+
+### Проверка после деплоя
+
+```bash
+docker ps --format '{{.Names}}: {{.Status}}' | grep podcast   # контейнеры живы
+docker logs podcast-admin --tail 5                            # админка поднялась
+curl -s -o /dev/null -w '%{http_code}' https://whntpdcst.com/feed.xml   # 200
+```
+
+Публичный трафик: Cloudflare Tunnel → nginx `podcast-static` (:8085), админка
+через тот же туннель на `admin.whntpdcst.com` (+ `:8086` в LAN). Cloudflare
+кэширует mp3 24ч (при замене эпизода в тот же день — менять URL на `?v=N`)
+и страницы сайта 5 мин.
 
 ## Структура
 

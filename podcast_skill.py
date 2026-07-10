@@ -134,9 +134,16 @@ DIGEST_PROMPT = """Ты — редактор еженедельного дайд
 - Английские названия продуктов, моделей и компаний оставляй латиницей как есть
 - Темы из раздела «Уже освещалось в прошлых выпусках» заново НЕ разбирай — максимум \
 короткая отсылка «об этом говорили в выпуске от ...» внутри связанной новой темы
-
+{focus_block}
 Материалы этой недели:
 {context}"""
+
+DIGEST_FOCUS_NOTE = """
+Особый фокус этого выпуска: {focus}
+- Темы, относящиеся к фокусу, отбирай в первую очередь и разбирай заметно глубже \
+(конкретика, детали, разбор «что это значит на самом деле»)
+- Прочие значимые новости недели — короче обычного или строкой в «Коротко»
+"""
 
 SCRIPT_PROMPT = """Ты пишешь сценарий для подкаста «Что нового в AI» с двумя ведущими.
 
@@ -160,9 +167,14 @@ SCRIPT_PROMPT = """Ты пишешь сценарий для подкаста «
 АЛЕКС: текст реплики
 САША: текст реплики
 АЛЕКС: текст реплики
-
+{focus_block}
 Дайджест недели:
 {digest}"""
+
+SCRIPT_FOCUS_NOTE = """
+Особый фокус выпуска: {focus} — этим темам удели основное время и глубину, \
+остальные обсуждайте короче.
+"""
 
 
 DIGEST_HTML_TEMPLATE = """<!DOCTYPE html>
@@ -636,33 +648,46 @@ def call_llm(prompt: str, temperature: float, max_tokens: int = 4096) -> str:
     return data["choices"][0]["message"]["content"]
 
 
-def generate_digest(context: str, date: str) -> str:
+def generate_digest(context: str, date: str, focus: str | None = None) -> str:
     """Stage 1: raw materials → structured Markdown digest."""
     # Truncate context (~40k tokens for Gemini Flash; TG sources come last,
     # so a low cap would silently drop them)
     if len(context) > 150000:
         context = context[:150000] + "\n\n[... материалы обрезаны ...]"
 
+    focus_block = DIGEST_FOCUS_NOTE.format(focus=focus) if focus else ""
     print(f"[LLM] Генерирую дайджест ({len(context)} символов контекста)...")
-    digest = call_llm(DIGEST_PROMPT.format(date=date, context=context), temperature=0.4)
+    digest = call_llm(
+        DIGEST_PROMPT.format(date=date, context=context, focus_block=focus_block),
+        temperature=0.4, max_tokens=8192,
+    )
     print(f"[LLM] Дайджест готов: {len(digest)} символов")
     return digest
 
 
-def generate_script(digest: str) -> str:
-    """Stage 2: digest → dialogue script. Length scales with topic count."""
+def generate_script(digest: str, minutes: int | None = None, focus: str | None = None) -> str:
+    """Stage 2: digest → dialogue script. Length scales with topic count,
+    or is pinned by an explicit target duration."""
     n_topics = len(re.findall(r"^##\s+(?!Коротко|Источники)", digest, flags=re.MULTILINE)) or 5
-    words_lo = min(max(n_topics * 230, 600), 1900)
-    words_hi = words_lo + 500
-    length_hint = f"~{max(words_lo // 170, 3)}-{words_hi // 150} минут, примерно {words_lo}-{words_hi} слов диалога"
+    if minutes:
+        words_lo = minutes * 145
+        words_hi = minutes * 175
+        length_hint = f"~{minutes} минут, примерно {words_lo}-{words_hi} слов диалога"
+    else:
+        words_lo = min(max(n_topics * 230, 600), 1900)
+        words_hi = words_lo + 500
+        length_hint = f"~{max(words_lo // 170, 3)}-{words_hi // 150} минут, примерно {words_lo}-{words_hi} слов диалога"
     topics_hint = (
         f"все {n_topics} тем дайджеста" if n_topics <= 8
         else "8 самых интересных тем дайджеста"
     )
+    focus_block = SCRIPT_FOCUS_NOTE.format(focus=focus) if focus else ""
     print(f"[LLM] Генерирую сценарий из дайджеста ({n_topics} тем → {length_hint})...")
     script = call_llm(
-        SCRIPT_PROMPT.format(digest=digest, length_hint=length_hint, topics_hint=topics_hint),
+        SCRIPT_PROMPT.format(digest=digest, length_hint=length_hint,
+                             topics_hint=topics_hint, focus_block=focus_block),
         temperature=0.8,
+        max_tokens=max(4096, words_hi * 4),
     )
     print(f"[LLM] Сценарий готов: {len(script)} символов")
     return script
@@ -936,6 +961,10 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Только сценарий, без TTS и MP3")
     parser.add_argument("--no-publish", action="store_true",
                         help="Сгенерировать MP3+дайджест, но не публиковать в RSS (публикация из админки)")
+    parser.add_argument("--focus", type=str, default=None,
+                        help="Тематический фокус выпуска (свободный текст для промптов)")
+    parser.add_argument("--minutes", type=int, default=None,
+                        help="Целевая длительность эпизода в минутах (иначе — от числа тем)")
     args = parser.parse_args()
 
     today = datetime.now().strftime("%Y-%m-%d")
@@ -996,7 +1025,7 @@ def main():
         print(f"[out] Артефакты за {today} уже есть → пишу как {stem}.*")
 
     # 4. Stage 1: digest
-    digest = generate_digest(context, today)
+    digest = generate_digest(context, today, focus=args.focus)
     if sources:
         digest += "\n\n## Источники выпуска\n" + "\n".join(f"- {s}" for s in sources)
 
@@ -1013,7 +1042,7 @@ def main():
         print(f"[digest] HTML не сгенерирован: {e}")
 
     # 5. Stage 2: script from digest
-    script = generate_script(digest)
+    script = generate_script(digest, minutes=args.minutes, focus=args.focus)
 
     # Save script for debugging
     script_path = DATA_DIR / f"script_{stem}.txt"

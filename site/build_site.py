@@ -124,15 +124,16 @@ PAGE = """<!DOCTYPE html>
 """
 
 
-def nav_html(lang: str, active: str) -> str:
+def nav_html(lang: str, active: str, alt_href: str) -> str:
+    """Site nav. alt_href — the same page in the other language (toggle target)."""
     if lang == "ru":
-        items = [("/ru/", "~/", "home"), ("/podcast/", "~/подкаст", "podcast"),
-                 ("/blog/", "~/блог", "blog")]
-        toggle = '<a class="lang" href="/">[EN]</a>'
+        items = [("/ru/", "~/", "home"), ("/ru/podcast/", "~/подкаст", "podcast"),
+                 ("/ru/blog/", "~/блог", "blog")]
+        toggle = f'<a class="lang" href="{alt_href}">[EN]</a>'
     else:
         items = [("/", "~/", "home"), ("/podcast/", "~/podcast", "podcast"),
                  ("/blog/", "~/blog", "blog")]
-        toggle = '<a class="lang" href="/ru/">[RU]</a>'
+        toggle = f'<a class="lang" href="{alt_href}">[RU]</a>'
     links = []
     for href, label, key in items:
         cls = ' class="active"' if key == active else ""
@@ -140,11 +141,12 @@ def nav_html(lang: str, active: str) -> str:
     return "\n".join(links) + "\n" + toggle
 
 
-def render(out_path: Path, *, lang: str, active: str, title: str, description: str, body: str) -> None:
+def render(out_path: Path, *, lang: str, active: str, title: str,
+           description: str, body: str, alt_href: str) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(PAGE.format(
         lang=lang, title=H.escape(title), description=H.escape(description),
-        nav=nav_html(lang, active), body=body, year=datetime.now().year,
+        nav=nav_html(lang, active, alt_href), body=body, year=datetime.now().year,
     ), encoding="utf-8")
     print(f"[site] {out_path.relative_to(OUT)}")
 
@@ -173,10 +175,6 @@ for listening and hitting «publish».</p>
 <p>Personal automated news brief compiled from Telegram channels every morning
 — read as a user, summarized by an LLM, delivered before coffee.</p>
 <p class="meta">telethon · LLM · cron</p></li>
-<li class="card"><h3>homelab «carbon»</h3>
-<p>An old laptop under the TV running the whole thing: Docker, tunnels,
-pipelines, this site. No cloud bills, no uptime guarantees.</p>
-<p class="meta">docker · cloudflare tunnel · nginx</p></li>
 </ul>
 
 <p class="prompt">cat contact</p>
@@ -197,7 +195,7 @@ LANDING_RU = f"""
 
 <p class="prompt">ls projects/</p>
 <ul class="plain">
-<li class="card"><h3><a href="/podcast/">whntpdcst — «Что нового в AI»</a></h3>
+<li class="card"><h3><a href="/ru/podcast/">whntpdcst — «Что нового в AI»</a></h3>
 <p>Еженедельный подкаст об AI, полностью сгенерированный AI: источники →
 дайджест → сценарий двух ведущих → многоголосый TTS. Человек в процессе
 один раз — послушать и нажать «опубликовать».</p>
@@ -206,10 +204,6 @@ LANDING_RU = f"""
 <p>Личная автоматическая новостная сводка из Telegram-каналов каждое утро —
 читается от имени пользователя, суммаризируется LLM, приходит до кофе.</p>
 <p class="meta">telethon · LLM · cron</p></li>
-<li class="card"><h3>homelab «carbon»</h3>
-<p>Старый ноутбук под телевизором, на котором крутится всё это: Docker,
-туннели, пайплайны, этот сайт. Без счетов за облако и гарантий аптайма.</p>
-<p class="meta">docker · cloudflare tunnel · nginx</p></li>
 </ul>
 
 <p class="prompt">cat contact</p>
@@ -239,34 +233,60 @@ def episodes_from_feed() -> list[dict]:
             "number": item.findtext(it_ns + "episode") or "",
             "url": url,
             "date": date,
-            "duration": f"{dur // 60} мин" if dur else "",
+            "duration": str(dur // 60) if dur else "",
             "digest": f"/digests/{m.group(1)}" if m else "",
         })
     return eps
 
 
-def podcast_body() -> str:
+PODCAST_STR = {
+    "ru": {
+        "tagline": "Еженедельный AI-дайджест голосом и текстом — без бесконечных лент и видео.",
+        "about": ("Каждый выпуск полностью генерируется AI: сбор источников (YouTube, "
+                  "Hacker News, статьи, Telegram-каналы), текстовый дайджест, сценарий "
+                  "диалога двух ведущих и озвучка. Подкаст на русском языке."),
+        "add_by_url": "В любом подкаст-приложении: «добавить по URL» →",
+        "digest": "текстовый дайджест",
+        "min": "мин",
+        "empty": "Пока нет выпусков.",
+        "title": "Подкаст «Что нового в AI»",
+    },
+    "en": {
+        "tagline": "A weekly AI digest as audio and text — no endless feeds, no videos.",
+        "about": ("Every episode is fully AI-generated: source collection (YouTube, "
+                  "Hacker News, papers, Telegram channels), a written digest, a two-host "
+                  "dialogue script and speech synthesis. The show is in Russian."),
+        "add_by_url": "In any podcast app: “add by URL” →",
+        "digest": "text digest",
+        "min": "min",
+        "empty": "No episodes yet.",
+        "title": "Podcast “What’s new in AI”",
+    },
+}
+
+
+def podcast_body(lang: str) -> str:
+    s = PODCAST_STR[lang]
     apple = (f'<a class="btn" href="{LINKS["apple"]}">Apple Podcasts</a>' if LINKS["apple"] else "")
     cards = []
     for e in episodes_from_feed():
-        digest = f' · <a href="{e["digest"]}">текстовый дайджест</a>' if e["digest"] else ""
+        digest = f' · <a href="{e["digest"]}">{s["digest"]}</a>' if e["digest"] else ""
+        dur = f" · {e['duration']} {s['min']}" if e["duration"] else ""
         cards.append(f"""<li class="card">
 <h3>{H.escape(e['title'])}</h3>
-<p class="meta">{e['date']}{' · ' + e['duration'] if e['duration'] else ''}{digest}</p>
+<p class="meta">{e['date']}{dur}{digest}</p>
 <audio controls preload="none" src="{H.escape(e['url'])}"></audio>
 </li>""")
-    eps_html = "\n".join(cards) if cards else "<p class='meta'>Пока нет выпусков.</p>"
+    eps_html = "\n".join(cards) if cards else f"<p class='meta'>{s['empty']}</p>"
     return f"""
 <p class="prompt">cat podcast/README.md</p>
 <h1>«Что нового в AI»</h1>
-<p class="tagline">Еженедельный AI-дайджест голосом и текстом — без бесконечных лент и видео.</p>
-<p>Каждый выпуск полностью генерируется AI: сбор источников (YouTube, Hacker News,
-статьи, Telegram-каналы), текстовый дайджест, сценарий диалога и голоса ведущих
-Алекса и Саши. Подкаст на русском языке.</p>
+<p class="tagline">{s['tagline']}</p>
+<p>{s['about']}</p>
 <p>{apple}
 <a class="btn" href="{LINKS['rss']}">RSS</a>
 <a class="btn" href="https://antennapod.org/">Android: AntennaPod</a></p>
-<p class="meta">В любом подкаст-приложении: «добавить по URL» → <code>{LINKS['rss']}</code></p>
+<p class="meta">{s['add_by_url']} <code>{LINKS['rss']}</code></p>
 
 <p class="prompt">ls episodes/ --sort=date</p>
 <ul class="plain">
@@ -305,36 +325,51 @@ def load_posts() -> list[dict]:
 
 
 def blog_pages() -> None:
+    """Posts are single pages (each in its own language); the index exists in both."""
     posts = load_posts()
     items = []
     for post in posts:
         body_html = markdown.markdown(post["body_md"], extensions=["extra", "fenced_code"])
+        back = "/ru/blog/" if post["lang"] == "ru" else "/blog/"
+        alt_back = "/blog/" if post["lang"] == "ru" else "/ru/blog/"
         body = f"""
 <p class="prompt">cat blog/{H.escape(post['slug'])}.md</p>
 <h1>{H.escape(post['title'])}</h1>
 <p class="meta">{post['date']} · {post['lang']}</p>
 {body_html}
-<p><a href="/blog/">← blog</a></p>
+<p><a href="{back}">← blog</a></p>
 """
         render(OUT / "blog" / f"{post['slug']}.html",
                lang=post["lang"], active="blog", title=post["title"],
-               description=post["title"], body=body)
+               description=post["title"], body=body, alt_href=alt_back)
         items.append(
             f'<li><span class="meta mono">{post["date"]}</span> — '
             f'<a href="/blog/{post["slug"]}.html">{H.escape(post["title"])}</a>'
             f' <span class="meta">[{post["lang"]}]</span></li>'
         )
-    index_body = f"""
+    listing = chr(10).join(items)
+    index_ru = f"""
 <p class="prompt">ls blog/ --sort=date</p>
 <h1>Блог</h1>
 <p class="tagline">Нерегулярные заметки: AI, автоматизация, инженерное. RU/EN вперемешку.</p>
 <ul class="plain">
-{chr(10).join(items) if items else "<p class='meta'>Пока пусто. Скоро будет.</p>"}
+{listing if items else "<p class='meta'>Пока пусто. Скоро будет.</p>"}
 </ul>
 """
-    render(OUT / "blog" / "index.html", lang="ru", active="blog",
-           title="Блог — Sergei Sokolov", description="Заметки про AI и автоматизацию",
-           body=index_body)
+    index_en = f"""
+<p class="prompt">ls blog/ --sort=date</p>
+<h1>Blog</h1>
+<p class="tagline">Irregular notes on AI, automation and engineering. A mix of RU/EN.</p>
+<ul class="plain">
+{listing if items else "<p class='meta'>Nothing here yet. Soon.</p>"}
+</ul>
+"""
+    render(OUT / "blog" / "index.html", lang="en", active="blog",
+           title="Blog — Sergei Sokolov", description="Notes on AI and automation",
+           body=index_en, alt_href="/ru/blog/")
+    render(OUT / "ru" / "blog" / "index.html", lang="ru", active="blog",
+           title="Блог — Сергей Соколов", description="Заметки про AI и автоматизацию",
+           body=index_ru, alt_href="/blog/")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -345,15 +380,19 @@ def build() -> None:
     render(OUT / "index.html", lang="en", active="home",
            title="Sergei Sokolov — AI Adopter",
            description="AI Adopter: LLM pipelines, automation, an AI-generated podcast",
-           body=LANDING_EN)
+           body=LANDING_EN, alt_href="/ru/")
     render(OUT / "ru" / "index.html", lang="ru", active="home",
            title="Сергей Соколов — AI Adopter",
            description="AI Adopter: LLM-пайплайны, автоматизация, AI-подкаст",
-           body=LANDING_RU)
-    render(OUT / "podcast" / "index.html", lang="ru", active="podcast",
-           title="Подкаст «Что нового в AI»",
+           body=LANDING_RU, alt_href="/")
+    render(OUT / "podcast" / "index.html", lang="en", active="podcast",
+           title=PODCAST_STR["en"]["title"],
+           description="A weekly AI digest as audio and text",
+           body=podcast_body("en"), alt_href="/ru/podcast/")
+    render(OUT / "ru" / "podcast" / "index.html", lang="ru", active="podcast",
+           title=PODCAST_STR["ru"]["title"],
            description="Еженедельный AI-дайджест голосом и текстом",
-           body=podcast_body())
+           body=podcast_body("ru"), alt_href="/podcast/")
     blog_pages()
     print(f"[site] Готово → {OUT}")
 

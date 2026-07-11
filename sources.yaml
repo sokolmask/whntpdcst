@@ -21,6 +21,8 @@ youtube:
     - {handle: "@NetworkChuck",         category: "IT/DevOps"}
     - {handle: "@ThePragmaticEngineer", category: "Tech Industry"}
     - {handle: "@ycombinator",          category: "Startups"}
+    - {handle: "@TechAviv",             category: "Israel Startups"}
+    - {handle: "@ChinaTalkMedia",       category: "China Tech/AI"}
 
 hackernews:
   enabled: true
@@ -31,6 +33,19 @@ hackernews:
 huggingface_papers:
   enabled: true
   max_items: 8
+
+# Веб-издания и рассылки (израильская и китайская сцена — ранний сигнал)
+rss:
+  enabled: true
+  max_items_per_feed: 5
+  feeds:
+    - {url: "https://nocamels.com/feed/",                                                     name: "NoCamels",  category: "Israel Innovation"}
+    - {url: "https://news.google.com/rss/search?q=site:calcalistech.com&hl=en-US&gl=US&ceid=US:en", name: "CTech (Calcalist)", category: "Israel Tech"}
+    - {url: "https://technode.com/feed/",                                                     name: "TechNode",  category: "China Tech"}
+    - {url: "https://chinai.substack.com/feed",                                               name: "ChinAI",    category: "China AI Analysis"}
+    - {url: "https://www.chinatalk.media/feed",                                               name: "ChinaTalk", category: "China Tech/Policy"}
+    # Geektime — иврит; включить, если хочется больше локальной израильской сцены
+    - {url: "https://www.geektime.co.il/feed/",                                               name: "Geektime",  category: "Israel Tech (he)", enabled: false}
 
 # Telegram-каналы читаются пользовательской сессией (tg_login.py — одноразовый
 # логин, TELEGRAM_* в .env). Список каналов — личный, поэтому живёт НЕ здесь,

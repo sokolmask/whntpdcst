@@ -131,6 +131,12 @@ DIGEST_PROMPT = """Ты — редактор еженедельного дайд
 - В конце темы строка «Источники:» со ссылками из материалов, если они там есть
 - Раздел «## Коротко» в конце — остальные заметные новости, по одной строке
 - Пиши плотно и фактурно, без воды, вступлений и выводов «в целом неделя показала»
+- Приоритет тем: (1) большие международные игроки — OpenAI, Anthropic, Google, Meta, xAI, \
+Mistral, DeepSeek и т.п. — и что их шаги значат на самом деле; (2) инновации и новые подходы; \
+(3) израильская и китайская стартап-сцена — их идеи и продукты разбирай как ранний сигнал: \
+то, что они делают сейчас, остальной мир будет делать через год-полтора
+- Новости российского рынка (Сбер, Яндекс, GigaChat, MTS AI и т.п.) отдельными темами НЕ делай — \
+максимум строка в «Коротко», и только если новость заметна на мировом уровне
 - Английские названия продуктов, моделей и компаний оставляй латиницей как есть
 - Темы из раздела «Уже освещалось в прошлых выпусках» заново НЕ разбирай — максимум \
 короткая отсылка «об этом говорили в выпуске от ...» внутри связанной новой темы
@@ -676,6 +682,62 @@ def fetch_web_context(
     return "\n\n".join(filter(None, [hn, hf])), sources
 
 
+def fetch_rss_context(
+    days_back: int,
+    rss_cfg: dict,
+    covered: dict,
+    new_items: dict[str, str],
+    old_mentions: list[str],
+) -> tuple[str, list[str]]:
+    """Fetch recent entries from configured RSS feeds (tech press, newsletters)."""
+    feeds = [f for f in rss_cfg.get("feeds", []) if f.get("enabled", True)]
+    if not rss_cfg.get("enabled", True) or not feeds:
+        return "", []
+
+    import feedparser  # type: ignore
+    from bs4 import BeautifulSoup  # type: ignore
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days_back)
+    max_items = int(rss_cfg.get("max_items_per_feed", 5))
+    parts: list[str] = []
+    sources: list[str] = []
+
+    with httpx.Client(timeout=20, follow_redirects=True,
+                      headers={"User-Agent": "Mozilla/5.0 (podcast-bot/1.0)"}) as client:
+        for i, f in enumerate(feeds, 1):
+            name, url, category = f.get("name", "?"), f.get("url", ""), f.get("category", "")
+            print(f"[RSS {i}/{len(feeds)}] {name}", end="", flush=True)
+            try:
+                feed = feedparser.parse(client.get(url).content)
+                items = []
+                for entry in feed.entries:
+                    ts = entry.get("published_parsed") or entry.get("updated_parsed")
+                    if ts and datetime(*ts[:6], tzinfo=timezone.utc) < cutoff:
+                        continue
+                    link = entry.get("link", "")
+                    title = entry.get("title", "").strip()
+                    if not link or not title:
+                        continue
+                    if f"rss:{link}" in covered:
+                        old_mentions.append(
+                            f"{title} ({name}) — выпуск от {covered[f'rss:{link}'].get('episode', '?')}"
+                        )
+                        continue
+                    summary = BeautifulSoup(entry.get("summary", ""), "html.parser").get_text(" ", strip=True)
+                    new_items[f"rss:{link}"] = title
+                    items.append(f"- {title}\n  {link}\n  {summary[:1200]}")
+                    if len(items) >= max_items:
+                        break
+                if items:
+                    parts.append(f"## RSS: {name} ({category})\n" + "\n".join(items))
+                    sources.append(f"{name} ({category})")
+                print(f" — {len(items)} материалов")
+            except Exception as e:
+                print(f" — ошибка: {e}")
+
+    return "\n\n".join(parts), sources
+
+
 # ── Digest & script generation ────────────────────────────────────────────────
 
 def call_llm(prompt: str, temperature: float, max_tokens: int = 4096) -> str:
@@ -1148,13 +1210,18 @@ def main():
             covered, new_items, old_mentions,
         )
 
-        # 2b. Fetch Telegram channels (user session; includes private subscriptions)
+        # 2b. Fetch RSS feeds (Israeli/Chinese tech press, newsletters)
+        rss_context, rss_sources = fetch_rss_context(
+            args.days, cfg.get("rss", {}), covered, new_items, old_mentions
+        )
+
+        # 2c. Fetch Telegram channels (user session; includes private subscriptions)
         tg_context, tg_sources = fetch_telegram_context(
             args.days, cfg.get("telegram", {}), covered, new_items, old_mentions
         )
 
         # 3. Build combined context
-        context_parts = list(filter(None, [yt_context, web_context, tg_context]))
+        context_parts = list(filter(None, [yt_context, web_context, rss_context, tg_context]))
         if not context_parts:
             print("ОШИБКА: нет материалов для подкаста")
             sys.exit(1)
@@ -1168,7 +1235,7 @@ def main():
             print(f"[covered] Пропущено как уже освещённое: {len(old_mentions)}")
 
         context = "\n\n".join(context_parts)
-        sources = yt_sources + web_sources + tg_sources
+        sources = yt_sources + web_sources + rss_sources + tg_sources
         print(f"[context] Всего символов: {len(context)}, источников: {len(sources)}, новых материалов: {len(new_items)}")
 
     # Output stem: never overwrite same-day artifacts (published episode/digest

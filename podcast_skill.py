@@ -239,8 +239,15 @@ CONDENSE_PROMPT = """Сократи фрагмент диалога подкас
 {segment}"""
 
 
+TRANSLATE_DIGEST_PROMPT = """Translate this Russian Markdown digest of AI news into English.
+Keep the Markdown structure, headings, links and facts exactly as they are.
+Write natural tech-journalism English. Leave product/company names as is.
+Output only the translated Markdown, nothing else.
+
+{digest}"""
+
 DIGEST_HTML_TEMPLATE = """<!DOCTYPE html>
-<html lang="ru">
+<html lang="{lang}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -263,21 +270,27 @@ DIGEST_HTML_TEMPLATE = """<!DOCTYPE html>
 </head>
 <body>
 {body}
-<p class="footer">Дайджест сгенерирован AI · <a href="{base_url}/feed.xml">Подкаст «Что нового в AI»</a></p>
+<p class="footer">{footer}</p>
 </body>
 </html>
 """
 
+DIGEST_FOOTERS = {
+    "ru": 'Дайджест сгенерирован AI · <a href="{base_url}/feed.xml">Подкаст «Что нового в AI»</a>',
+    "en": 'AI-generated digest · <a href="{base_url}/feed.xml">«Что нового в AI» podcast</a>',
+}
 
-def render_digest_html(digest_md: str, out_path: Path, title: str) -> None:
+
+def render_digest_html(digest_md: str, out_path: Path, title: str, lang: str = "ru") -> None:
     """Render the MD digest to a standalone mobile-friendly HTML page."""
     import markdown
 
     # Wrap bare URLs into <...> so python-markdown turns them into links
     linked = re.sub(r'(?<![\(<"])(https?://[^\s<>\)\]",]+)', r"<\1>", digest_md)
     body = markdown.markdown(linked, extensions=["extra"])
+    footer = DIGEST_FOOTERS.get(lang, DIGEST_FOOTERS["ru"]).format(base_url=BASE_URL)
     out_path.write_text(
-        DIGEST_HTML_TEMPLATE.format(title=title, body=body, base_url=BASE_URL),
+        DIGEST_HTML_TEMPLATE.format(title=title, body=body, lang=lang, footer=footer),
         encoding="utf-8",
     )
 
@@ -1263,6 +1276,23 @@ def main():
     except Exception as e:
         print(f"[digest] HTML не сгенерирован: {e}")
 
+    # 4b. English version of the digest
+    digest_en_ok = False
+    try:
+        print("[LLM] Перевожу дайджест на английский...")
+        digest_en = call_llm(
+            TRANSLATE_DIGEST_PROMPT.format(digest=digest), temperature=0.3, max_tokens=8192
+        )
+        (DIGESTS_DIR / f"{stem}.en.md").write_text(digest_en, encoding="utf-8")
+        render_digest_html(
+            digest_en, DIGESTS_DIR / f"{stem}.en.html",
+            f"What's new in AI — {today}", lang="en",
+        )
+        digest_en_ok = True
+        print(f"[digest] EN → {DIGESTS_DIR / f'{stem}.en.html'}")
+    except Exception as e:
+        print(f"[digest] EN не сгенерирован: {e}")
+
     # 5. Stage 2: script from digest
     script = generate_script(digest, minutes=args.minutes, focus=args.focus)
 
@@ -1308,12 +1338,32 @@ def main():
     import rss_manager
     ep_num = rss_manager.get_next_episode_number()
     title = f"Выпуск {ep_num} — {today}"
+    digest_links = f"RU: {BASE_URL}/digests/{stem}.html"
+    if digest_en_ok:
+        digest_links += f"\nEN: {BASE_URL}/digests/{stem}.en.html"
+    if len(sources) > 4:
+        yt_n = sum(1 for s in sources if s.startswith("YouTube "))
+        tg_n = sum(1 for s in sources if s.startswith("Telegram "))
+        rest = [s for s in sources if not s.startswith(("YouTube ", "Telegram "))]
+        summary = []
+        if yt_n:
+            summary.append(f"YouTube ({yt_n} каналов)")
+        summary += [re.sub(r"\s*\(.*\)$", "", s) for s in rest[:4]]
+        if tg_n:
+            summary.append(f"Telegram ({tg_n} каналов)")
+        sources_line = ", ".join(summary) + " и другие — полный список в текстовом дайджесте"
+    else:
+        sources_line = ", ".join(sources) if sources else "YouTube, HackerNews, HuggingFace Papers"
     description = (
-        f"Еженедельный обзор AI новостей за неделю от {today}: "
-        f"ключевые события в мире искусственного интеллекта и что они значат на практике. "
-        f"Выпуск полностью сгенерирован AI: дайджест, сценарий и озвучка. "
-        f"Текстовый дайджест выпуска: {BASE_URL}/digests/{stem}.html. "
-        f"Источники: {', '.join(sources) if sources else 'YouTube, HackerNews, HuggingFace Papers'}."
+        f"Еженедельный обзор AI-новостей — неделя от {today}: ключевые события "
+        f"и что они значат на практике.\n"
+        f"\n"
+        f"Текстовый дайджест выпуска:\n"
+        f"{digest_links}\n"
+        f"\n"
+        f"Источники: {sources_line}.\n"
+        f"\n"
+        f"Выпуск полностью сгенерирован AI: дайджест, сценарий и озвучка."
     )
     manifest = {
         "date": today,

@@ -39,13 +39,14 @@ rss:
   enabled: true
   max_items_per_feed: 5
   feeds:
-    - {url: "https://nocamels.com/feed/",                                                     name: "NoCamels",  category: "Israel Innovation"}
+    # Израиль (NoCamels мёртв с окт.2024, Times of Israel блокирует ботов — не добавлять)
     - {url: "https://news.google.com/rss/search?q=site:calcalistech.com&hl=en-US&gl=US&ceid=US:en", name: "CTech (Calcalist)", category: "Israel Tech"}
-    - {url: "https://technode.com/feed/",                                                     name: "TechNode",  category: "China Tech"}
-    - {url: "https://chinai.substack.com/feed",                                               name: "ChinAI",    category: "China AI Analysis"}
-    - {url: "https://www.chinatalk.media/feed",                                               name: "ChinaTalk", category: "China Tech/Policy"}
-    # Geektime — иврит; включить, если хочется больше локальной израильской сцены
-    - {url: "https://www.geektime.co.il/feed/",                                               name: "Geektime",  category: "Israel Tech (he)", enabled: false}
+    - {url: "https://news.google.com/rss/search?q=Israeli+AI+startup&hl=en-US&gl=US&ceid=US:en",    name: "Israeli AI startups (Google News)", category: "Israel Startups"}
+    - {url: "https://www.geektime.co.il/feed/",   name: "Geektime",  category: "Israel Tech (he)"}
+    # Китай
+    - {url: "https://technode.com/feed/",         name: "TechNode",  category: "China Tech"}
+    - {url: "https://chinai.substack.com/feed",   name: "ChinAI",    category: "China AI Analysis"}
+    - {url: "https://www.chinatalk.media/feed",   name: "ChinaTalk", category: "China Tech/Policy"}
 
 # Telegram-каналы читаются пользовательской сессией (tg_login.py — одноразовый
 # логин, TELEGRAM_* в .env). Список каналов — личный, поэтому живёт НЕ здесь,

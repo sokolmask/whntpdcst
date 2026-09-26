@@ -62,6 +62,15 @@ GEMINI_VOICE_SASHA = "Leda"    # female
 
 SILENCE_BETWEEN_SPEAKERS_SEC = 0.3
 
+# Episode length when --minutes isn't given (admin panel runs never pass it).
+# Gemini TTS speaks Russian dialogue at ~145 wpm (measured on episode 3).
+DEFAULT_MINUTES = int(os.environ.get("PODCAST_MINUTES", "18"))
+WORDS_PER_MINUTE = 145
+FINAL_SEGMENT_WORDS = 400
+# Raw materials cap for the digest call. Transcripts alone are ~19 channels x
+# 2 videos x 8k chars; TG sources come last, so a low cap silently drops them.
+CONTEXT_MAX_CHARS = 350000
+
 SOURCES_PATH = Path(os.environ.get("PODCAST_SOURCES", Path(__file__).parent / "sources.yaml"))
 EXTRA_SOURCES_PATH = DATA_DIR / "sources.extra.yaml"   # user additions from admin panel
 COVERED_PATH = DATA_DIR / "covered.json"               # items already covered in published episodes
@@ -159,9 +168,11 @@ DeepSeek, Qwen и т.п. — и что их шаги значат на само�
 - Заголовок первого уровня: # Что нового в AI — {date}
 - Раздел «## Главное за неделю»: 3-5 предложений — что на самом деле сдвинулось за неделю и какая \
 общая линия прослеживается. Если неделя проходная — так и скажи.
-- 5-8 тем, каждая — раздел ## с заголовком-тезисом (утверждение по существу, без рекламных слов). \
+- 6-9 тем, каждая — раздел ## с заголовком-тезисом (утверждение по существу, без рекламных слов). \
 В каждой теме короткие абзацы с метками:
-  **Что произошло.** Факты: кто, что, когда, цифры, условия доступа, цена.
+  **Что произошло.** Факты: кто, что, когда, цифры, условия доступа, цена. Не ужимай: \
+конкретные детали из материалов (результаты, сравнения, цитаты, примеры использования) — \
+это то, на чём держится разговор в подкасте.
   **Контекст.** Как это связано с прошлыми выпусками и трендом; что было до этого.
   **Оценка.** Прорыв, заметный шаг, инкремент или шум — и по какому критерию. Что заявлено, а что доказано.
   **Что это меняет.** Для отрасли и разработчиков; отдельно для обычных людей: конкретный сценарий \
@@ -282,6 +293,13 @@ SCRIPT_PROMPT = """Ты пишешь сценарий аналитическог
 Дайджест недели:
 {digest}"""
 
+EXCERPTS_BLOCK = """
+Первоисточники по теме (выдержки из материалов недели: транскрипты, статьи, посты). Бери отсюда \
+детали, цифры, примеры и цитаты, которых нет в дайджесте, — именно они делают разговор предметным. \
+Ничего сверх написанного здесь и в дайджесте не выдумывай:
+{excerpts}
+"""
+
 SCRIPT_FOCUS_NOTE = """
 Особый фокус выпуска: {focus} — этим темам удели основное время и глубину, \
 остальные обсуждайте короче.
@@ -291,8 +309,9 @@ SEGMENT_PROMPT = """Ты пишешь фрагмент сценария анал
 
 {hosts}
 
-Это ОДИН ФРАГМЕНТ длинного выпуска — разговор по одной теме, примерно {words} слов диалога. \
-Не растекайся: это один фрагмент из многих, уложись в объём. \
+Это ОДИН ФРАГМЕНТ длинного выпуска — разговор по одной теме, примерно {words} слов диалога \
+(±15%: и сильно короче, и сильно длиннее — плохо). Объём заполняй содержанием: деталями из \
+первоисточников, механикой, примерами, спором ведущих, а не повторами и общими словами. \
 Разбирайте тему глубоко: что произошло (факты, цифры, названия) → как это работает и почему сейчас → \
 прорыв это или нет, и по какому критерию → что это меняет для отрасли и для обычных людей \
 (конкретный пример) → где подводные камни и что остаётся под вопросом. \
@@ -315,7 +334,8 @@ SEGMENT_PROMPT = """Ты пишешь фрагмент сценария анал
 
 Тема фрагмента:
 ## {title}
-{body}"""
+{body}
+{excerpts}"""
 
 FINAL_SEGMENT_PROMPT = """Ты пишешь финальный фрагмент сценария аналитического подкаста «Что нового в AI» с двумя ведущими.
 
@@ -324,7 +344,7 @@ FINAL_SEGMENT_PROMPT = """Ты пишешь финальный фрагмент 
 Это КОНЕЦ выпуска. Сначала короткий блиц по новостям ниже (одна-две реплики на новость, \
 с оценкой, а не пересказом; неважное можно пропустить), затем вывод недели из плана редактора \
 или открытый вопрос на следующие выпуски — и всё, без долгих прощаний. \
-Весь финал — примерно 250-300 слов.
+Весь финал — примерно {words} слов.
 {continuity}
 Правила:
 - Только живой разговор — никаких списков и буллетов в репликах
@@ -500,7 +520,7 @@ def get_recent_videos(client: httpx.Client, playlist_id: str, days_back: int, ma
         return []
 
 
-def get_transcript(video_id: str, max_chars: int = 5000) -> str | None:
+def get_transcript(video_id: str, max_chars: int = 8000) -> str | None:
     """Fetch transcript preferring Russian then English."""
     try:
         tlist = YouTubeTranscriptApi.list_transcripts(video_id)
@@ -1027,10 +1047,8 @@ def update_storylines(memo: str, digest: str, date: str, stem: str) -> None:
 
 def generate_digest(context: str, date: str, focus: str | None = None, history: str = "") -> str:
     """Stage 1: raw materials + past episodes → analytical Markdown digest."""
-    # Truncate context (~40k tokens; TG sources come last,
-    # so a low cap would silently drop them)
-    if len(context) > 150000:
-        context = context[:150000] + "\n\n[... материалы обрезаны ...]"
+    if len(context) > CONTEXT_MAX_CHARS:
+        context = context[:CONTEXT_MAX_CHARS] + "\n\n[... материалы обрезаны ...]"
 
     focus_block = DIGEST_FOCUS_NOTE.format(focus=focus) if focus else ""
     history_block = HISTORY_BLOCK.format(history=history) if history else ""
@@ -1078,13 +1096,44 @@ def _word_count(text: str) -> int:
     return len(re.findall(r"\S+", text))
 
 
-def generate_script_chunked(digest: str, minutes: int, plan: str) -> str:
+URL_RE = re.compile(r"https?://[^\s<>\)\]\"',]+")
+# where one item of raw material starts: YouTube video, HN/RSS/HF list item, TG post, source header
+ITEM_START_RE = re.compile(r"\n(?=Видео: |- |Пост \(|## )")
+
+
+def source_excerpts(context: str, topic_body: str, max_chars: int = 12000,
+                    per_item: int = 5000) -> str:
+    """Raw material behind a digest topic: the context items its links point to.
+    The digest compresses a transcript to a few lines; the dialogue needs the details."""
+    if not context:
+        return ""
+    out, total = [], 0
+    for url in dict.fromkeys(URL_RE.findall(topic_body)):
+        url = url.rstrip(".;:")
+        i = context.find(url)
+        if i < 0:
+            continue
+        start = max((m.start() + 1 for m in ITEM_START_RE.finditer(context, 0, i)), default=0)
+        nxt = ITEM_START_RE.search(context, i)
+        chunk = context[start:nxt.start() if nxt else len(context)].strip()[:per_item]
+        if chunk in out:
+            continue
+        out.append(chunk)
+        total += len(chunk)
+        if total >= max_chars:
+            break
+    return "\n\n".join(out)[:max_chars]
+
+
+def generate_script_chunked(digest: str, minutes: int, plan: str, context: str = "") -> str:
     """Long episodes: one LLM call per digest topic + a finale.
     A single call reliably undershoots length targets past ~12 minutes."""
     topics, korotko = split_digest_sections(digest)
-    # Gemini TTS speaks Russian dialogue at ~145 wpm (measured on episode 3)
-    words_per_topic = max(int(minutes * 145 / (len(topics) + 1)), 250)
-    print(f"[LLM] Длинный выпуск: {len(topics)} тем по ~{words_per_topic} слов + финал...")
+    target_words = minutes * WORDS_PER_MINUTE
+    final_words = FINAL_SEGMENT_WORDS if korotko else 0
+    words_per_topic = max(int((target_words - final_words) / max(len(topics), 1)), 250)
+    print(f"[LLM] Длинный выпуск (~{minutes} мин, {target_words} слов): "
+          f"{len(topics)} тем по ~{words_per_topic} слов + финал...")
     segments, tail = [], ""
     for i, (title, body) in enumerate(topics):
         position = (
@@ -1096,20 +1145,23 @@ def generate_script_chunked(digest: str, minutes: int, plan: str) -> str:
             f"\nПоследние реплики предыдущего фрагмента (не повторять, просто продолжить после них):\n{tail}\n"
             if tail else ""
         )
+        excerpts = source_excerpts(context, body)
         seg = call_llm(
             SEGMENT_PROMPT.format(hosts=HOSTS_BRIEF, words=words_per_topic, position=position,
-                                  continuity=continuity, plan=plan, title=title, body=body),
-            temperature=0.7,
+                                  continuity=continuity, plan=plan, title=title, body=body,
+                                  excerpts=EXCERPTS_BLOCK.format(excerpts=excerpts) if excerpts else ""),
+            temperature=0.7, max_tokens=max(4096, words_per_topic * 5),
         ).strip()
         segments.append(seg)
         seg_lines = [l for l in seg.splitlines() if l.strip()]
         tail = "\n".join(seg_lines[-2:])
-        print(f"[LLM]   {i + 1}/{len(topics)} «{title}» — {len(seg)} символов")
+        print(f"[LLM]   {i + 1}/{len(topics)} «{title}» — {_word_count(seg)} слов"
+              f"{f', первоисточники {len(excerpts)} симв.' if excerpts else ''}")
     if korotko:
         continuity = f"\nПоследние реплики перед финалом (не повторять):\n{tail}\n" if tail else ""
         final = call_llm(
             FINAL_SEGMENT_PROMPT.format(hosts=HOSTS_BRIEF, continuity=continuity,
-                                        plan=plan, korotko=korotko),
+                                        plan=plan, korotko=korotko, words=final_words),
             temperature=0.7,
         ).strip()
         segments.append(final)
@@ -1117,8 +1169,9 @@ def generate_script_chunked(digest: str, minutes: int, plan: str) -> str:
 
     # Models tend to overshoot per-segment word targets; condense
     # proportionally when the total is clearly past the requested duration
-    target_words = minutes * 145
     total_words = sum(_word_count(s) for s in segments)
+    if total_words < target_words * 0.75:
+        print(f"[LLM] ВНИМАНИЕ: сценарий {total_words} слов при цели {target_words} — выпуск выйдет короче")
     if total_words > target_words * 1.2:
         ratio = target_words / total_words
         print(f"[LLM] Сценарий {total_words} слов при цели {target_words} — ужимаю сегменты (x{ratio:.2f})...")
@@ -1138,12 +1191,12 @@ def generate_script_chunked(digest: str, minutes: int, plan: str) -> str:
 
 
 def generate_script(digest: str, minutes: int | None = None, focus: str | None = None,
-                    plan: str = "") -> str:
+                    plan: str = "", context: str = "") -> str:
     """Stage 2: digest + editor's plan → dialogue script. Length scales with
     topic count, or is pinned by an explicit target duration."""
     plan = plan or "(плана нет — выстрой разговор сам по дайджесту)"
     if minutes and minutes >= 15 and split_digest_sections(digest)[0]:
-        return generate_script_chunked(digest, minutes, plan)
+        return generate_script_chunked(digest, minutes, plan, context)
     n_topics = len(split_digest_sections(digest)[0]) or 5
     if minutes:
         words_lo = minutes * 145
@@ -1521,8 +1574,9 @@ def main():
                         help="Сгенерировать MP3+дайджест, но не публиковать в RSS (публикация из админки)")
     parser.add_argument("--focus", type=str, default=None,
                         help="Тематический фокус выпуска (свободный текст для промптов)")
-    parser.add_argument("--minutes", type=int, default=None,
-                        help="Целевая длительность эпизода в минутах (иначе — от числа тем)")
+    parser.add_argument("--minutes", type=int, default=DEFAULT_MINUTES,
+                        help=f"Целевая длительность эпизода в минутах (default {DEFAULT_MINUTES}, "
+                             f"env PODCAST_MINUTES; меньше 15 — короткий режим одним вызовом)")
     parser.add_argument("--digest-file", type=str, default=None,
                         help="Готовый дайджест (.md): пропустить сбор источников и этап 1, "
                              "items/sources взять из манифеста того же прогона")
@@ -1536,9 +1590,14 @@ def main():
     new_items: dict[str, str] = {}
     sources: list[str] = []
     digest = None
+    context = ""
     if args.digest_file:
         digest_src = Path(args.digest_file)
         digest = digest_src.read_text(encoding="utf-8")
+        ctx_path = DATA_DIR / f"context_{digest_src.stem}.txt"
+        if ctx_path.exists():
+            context = ctx_path.read_text(encoding="utf-8")
+            print(f"[digest-file] Сырые материалы из {ctx_path}: {len(context)} символов")
         man_path = EPISODES_DIR / f"{digest_src.stem}.items.json"
         if man_path.exists():
             man = json.loads(man_path.read_text(encoding="utf-8"))
@@ -1607,6 +1666,11 @@ def main():
         stem = f"{today}-{datetime.now().strftime('%H%M')}"
         print(f"[out] Артефакты за {today} уже есть → пишу как {stem}.*")
 
+    # Raw materials: the script pulls topic details from them; --digest-file reuses them
+    if context and not args.digest_file:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        (DATA_DIR / f"context_{stem}.txt").write_text(context, encoding="utf-8")
+
     # 4. Past episodes: storyline notebook + recent digests
     history, memo = load_history(stem)
 
@@ -1655,7 +1719,8 @@ def main():
         plan = generate_show_plan(digest, history=history, focus=args.focus)
     except Exception as e:
         print(f"[plan] План не составлен, пишу сценарий без него: {e}")
-    script = generate_script(digest, minutes=args.minutes, focus=args.focus, plan=plan)
+    script = generate_script(digest, minutes=args.minutes, focus=args.focus, plan=plan,
+                             context=context)
 
     # Save intermediate artifacts for debugging / before-after comparison
     script_path = DATA_DIR / f"script_{stem}.txt"

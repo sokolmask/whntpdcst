@@ -2,24 +2,44 @@
 
 Автоматический русскоязычный подкаст «Что нового в AI».
 
-Каждый эпизод: YouTube каналы + HackerNews + HuggingFace Papers → диалог Алекса и Саши → MP3 → Apple Podcasts.
+Каждый эпизод: YouTube, HackerNews, HuggingFace Papers, RSS, Telegram → аналитический дайджест с памятью о прошлых выпусках → диалог Алекса и Саши → MP3 → Apple Podcasts.
 
 **Слушать:** [whntpdcst.com/feed.xml](https://whntpdcst.com/feed.xml)
 
 ## Как работает
 
 ```
-YouTube (17 каналов) ──┐
-HackerNews AI ─────────┤──► Gemini 2.5 Flash ──► edge-tts ──► CBR MP3 ──► RSS
-HuggingFace Papers ────┘       (диалог ~10 мин)    Алекс + Саша     Apple Podcasts
+YouTube, HN, HF Papers, ──┐                       прошлые выпуски
+RSS, Telegram             │                       (блокнот сюжетов + 3 дайджеста)
+                          ▼                                │
+              аналитический дайджест ◄─────────────────────┘
+                          │  humanizer
+                          ▼
+              план редактора → диалог → humanizer → Gemini TTS → MP3 → RSS
 ```
 
 1. Собирает транскрипты YouTube и топ материалы недели (источники — в `sources.yaml`)
-2. Gemini пишет структурированный дайджест → [whntpdcst.com/digests/](https://whntpdcst.com/digests/) (MD + HTML)
-3. Из дайджеста генерируется живой диалог двух ведущих (~10 мин)
-4. Gemini multi-speaker TTS озвучивает: Алекс (`Charon`) + Саша (`Leda`); fallback — edge-tts
-5. ffmpeg кодирует в CBR 64k MP3
-6. RSS обновляется → Apple Podcasts подхватывает автоматически
+2. Подгружает контекст прошлых **опубликованных** выпусков: блокнот сквозных сюжетов
+   (`memory/<stem>.md` — что отслеживаем, какие прогнозы давали) и три последних дайджеста
+3. LLM пишет аналитический дайджест: отделяет прорывы от инкремента и маркетинга, связывает
+   новости с прошлыми выпусками, разбирает последствия для отрасли и для обычных людей →
+   [whntpdcst.com/digests/](https://whntpdcst.com/digests/) (MD + HTML, RU/EN)
+4. Блокнот сюжетов обновляется по новому дайджесту
+5. План редактора: тезис выпуска, порядок тем, где ведущие расходятся во мнениях
+6. Диалог двух ведущих: Алекс — инженер-скептик, Саша — аналитик технологий и общества
+7. Дайджест и сценарий проходят через [humanizer](https://github.com/blader/humanizer)
+   (`prompts/humanizer/SKILL.md`, MIT) + русское дополнение для диалога
+   (`prompts/humanizer/ru.md`) — вычищаются генеративные обороты. Блок, который после
+   правки сломал формат или потерял текст, остаётся исходным
+8. Gemini multi-speaker TTS озвучивает: Алекс (`Charon`) + Саша (`Leda`); fallback — edge-tts
+9. ffmpeg кодирует в CBR 64k MP3, RSS обновляется → Apple Podcasts подхватывает
+
+Модель для текста — `PODCAST_LLM_MODEL` (по умолчанию `anthropic/claude-sonnet-5` через
+OpenRouter). Если OpenRouter не знает id или модель недоступна — автоматический откат на
+`anthropic/claude-sonnet-4.5`, затем `google/gemini-2.5-flash`.
+
+Отладочные файлы в `$PODCAST_DATA_DIR`: `plan_<stem>.md` (план), `script_<stem>.raw.txt`
+(сценарий до humanizer), `script_<stem>.txt` (финальный). `--no-humanize` отключает проход.
 
 ## Запуск
 
@@ -70,7 +90,7 @@ git pull origin main
 
 | Что менялось | Что сделать после `git pull` |
 |---|---|
-| `podcast_skill.py`, `rss_manager.py`, `site/*`, `sources.yaml` | ничего — файлы монтируются, каждый запуск читает свежие |
+| `podcast_skill.py`, `prompts/*`, `rss_manager.py`, `site/*`, `sources.yaml` | ничего — файлы монтируются, каждый запуск читает свежие |
 | `admin/app.py` | `docker compose -f docker/docker-compose.yml restart podcast-admin` (uvicorn держит код в памяти) |
 | `docker/nginx.conf` | `docker compose -f docker/docker-compose.yml restart podcast-static` |
 | `docker/admin.Dockerfile` (зависимости админки) | `cd docker && docker compose up -d --build` |
@@ -107,7 +127,8 @@ curl -s -o /dev/null -w '%{http_code}' https://whntpdcst.com/feed.xml   # 200
 ## Структура
 
 ```
-podcast_skill.py   # основной pipeline
+podcast_skill.py   # основной pipeline (промпты — в начале файла)
+prompts/humanizer/ # humanizer-скилл (blader/humanizer, MIT) + русское дополнение
 sources.yaml       # источники (YouTube каналы, HN, HF) — правь и пушь
 rss_manager.py     # Apple Podcasts-совместимый RSS
 admin/app.py       # админка (FastAPI)

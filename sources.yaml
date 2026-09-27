@@ -24,11 +24,25 @@ youtube:
     - {handle: "@TechAviv",             category: "Israel Startups"}
     - {handle: "@ChinaTalkMedia",       category: "China Tech/AI"}
 
+# HN через Algolia: истории за период с min_points+, по заголовку, сортировка по баллам.
 hackernews:
   enabled: true
   min_points: 30
-  max_items: 10
-  queries: ["AI LLM", "machine learning", "Claude GPT", "AI agent"]
+  max_items: 40
+  queries: ["AI", "LLM", "GPT", "OpenAI", "Anthropic", "Claude", "Gemini", "DeepSeek",
+            "Qwen", "Mistral", "agent", "agents", "machine learning", "inference"]
+
+# Reddit: топ за период (day/week/month по --days) через RSS; JSON API отдаёт 403 ботам.
+reddit:
+  enabled: true
+  max_items_per_sub: 10
+  subreddits:
+    - {name: "LocalLLaMA",      category: "Open Models"}
+    - {name: "MachineLearning", category: "ML Research"}
+    - {name: "ClaudeAI",        category: "Claude"}
+    - {name: "OpenAI",          category: "OpenAI"}
+    - {name: "singularity",     category: "AI News", max_items: 8}
+    - {name: "AI_Agents",       category: "AI Agents", max_items: 8}
 
 huggingface_papers:
   enabled: true
@@ -57,6 +71,6 @@ rss:
 #       - {name: "-1001234567890", category: "Private"}  # приватный — по id
 telegram:
   enabled: true
-  max_posts_per_channel: 5
+  max_posts_per_channel: 15   # на канал можно переопределить: {name: ..., max_posts: 5}
   min_post_chars: 200
   channels: []

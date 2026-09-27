@@ -19,6 +19,7 @@ Environment variables:
 import os
 import sys
 import re
+import html
 import json
 import time
 import argparse
@@ -68,9 +69,9 @@ SILENCE_BETWEEN_SPEAKERS_SEC = 0.3
 DEFAULT_MINUTES = int(os.environ.get("PODCAST_MINUTES", "18"))
 WORDS_PER_MINUTE = 145
 FINAL_SEGMENT_WORDS = 400
-# Raw materials cap for the digest call. Transcripts alone are ~19 channels x
-# 2 videos x 8k chars; TG sources come last, so a low cap silently drops them.
-CONTEXT_MAX_CHARS = 350000
+# Raw materials cap for the digest call (~170k tokens). TG sources come last,
+# so a low cap silently drops them.
+CONTEXT_MAX_CHARS = 500000
 
 SOURCES_PATH = Path(os.environ.get("PODCAST_SOURCES", Path(__file__).parent / "sources.yaml"))
 EXTRA_SOURCES_PATH = DATA_DIR / "sources.extra.yaml"   # user additions from admin panel
@@ -134,6 +135,37 @@ def mark_covered(items: dict[str, str], episode_date: str) -> None:
     )
     print(f"[covered] +{len(items)} материалов → {COVERED_PATH} (всего {len(covered)})")
 
+
+def _norm_url(url: str) -> str:
+    return re.sub(r"^https?://(www\.)?", "", url.strip()).rstrip("/").lower()
+
+
+def items_used_in_digest(items: dict[str, str], digest: str) -> dict[str, str]:
+    """Items whose link is cited in the digest — only these count as covered.
+
+    Everything else fed to the digest stays in the pool for the next episodes
+    instead of being burned unused.
+    """
+    text = digest.lower().replace("://www.", "://")
+    used = {}
+    for key, title in items.items():
+        kind, _, ref = key.partition(":")
+        if kind == "yt":
+            needles = [ref.lower()]
+        elif kind == "tg":
+            chan, _, msg_id = ref.partition("/")
+            needles = [f"t.me/{chan}/{msg_id}".lower(), f"t.me/c/{chan}/{msg_id}".lower()]
+        elif kind == "hf":
+            needles = [ref.lower()]
+        else:  # hn / rss / reddit: full link, or the link without its query string
+            needles = [_norm_url(ref)]
+            bare = _norm_url(ref.split("?")[0])
+            if len(bare) > 25:
+                needles.append(bare)
+        if any(n and n in text for n in needles):
+            used[key] = title
+    return used
+
 DIGEST_PROMPT = """Ты — аналитик и редактор еженедельного дайджеста «Что нового в AI». Твоя аудитория — \
 люди, которые следят за AI не первый год: инженеры, продакты, предприниматели, и просто думающие \
 люди, которым важно понимать, как это изменит их работу и жизнь. Пересказ пресс-релизов им не нужен, \
@@ -146,8 +178,12 @@ DIGEST_PROMPT = """Ты — аналитик и редактор еженеде�
 - Отдели сигнал от шума. Большая часть недельного потока — инкрементальные релизы, демо и маркетинг. \
 Настоящий прорыв выглядит так: появилась возможность, которой раньше не было вовсе (а не +2% на \
 бенчмарке); цена или порог доступа упали на порядок; результат подтверждён независимо или уже \
-массово используется; крупный игрок или регулятор резко сменил курс. Если за неделю прорывов не было, \
-так и напиши, не раздувай инкремент до революции.
+массово используется; крупный игрок или регулятор резко сменил курс. Не раздувай инкремент до \
+революции, но и не жалуйся на «тихую неделю»: материала всегда больше, чем влезает в выпуск. \
+Если громких релизов нет — бери глубиной: разборы и интервью из длинных видео и подкастов, \
+обсуждения практиков на Reddit и HackerNews, бизнес-ходы и деньги вокруг AI, исследования, которые \
+меняют то, как строят системы. Фразы «неделя прошла тихо», «новостей немного», «выпуск тоненький» \
+не используй.
 - Различай «анонсировано», «доступно пользователям» и «проверено независимо». Цифры из пресс-релиза \
 и выбранные компанией бенчмарки называй тем, чем они являются.
 - Приоритет: (1) большие международные игроки — OpenAI, Anthropic, Google, Meta, xAI, Mistral, \
@@ -174,7 +210,7 @@ DeepSeek, Qwen и т.п. — и что их шаги значат на само�
 Структура:
 - Заголовок первого уровня: # Что нового в AI — {date}
 - Раздел «## Главное за неделю»: 3-5 предложений — что на самом деле сдвинулось за неделю и какая \
-общая линия прослеживается. Если неделя проходная — так и скажи.
+общая линия прослеживается.
 - 6-9 тем, каждая — раздел ## с заголовком-тезисом (утверждение по существу, без рекламных слов). \
 В каждой теме короткие абзацы с метками:
   **Что произошло.** Факты: кто, что, когда, цифры, условия доступа, цена. Не ужимай: \
@@ -186,8 +222,10 @@ DeepSeek, Qwen и т.п. — и что их шаги значат на само�
 (профессия, деньги, цены, здоровье, учёба, приватность) и горизонт — сейчас, через год, через пять лет. \
 Если для обычного человека ничего не меняется, прямо так и напиши.
   **Под вопросом.** Что неясно, где подводные камни, за чем следить в следующих выпусках.
-  В конце темы строка «Источники:» со ссылками из материалов, если они там есть.
-- Раздел «## Коротко» в конце — остальные заметные новости, по одной строке.
+  В конце темы строка «Источники:» — ВСЕ ссылки из материалов, на которых построена тема, \
+включая дубли той же новости из разных каналов. Ссылки копируй из материалов дословно, не сокращай.
+- Раздел «## Коротко» в конце — остальные заметные новости, по одной строке, в конце строки — \
+ссылка(и) на источник из материалов.
 
 Стиль: плотно и конкретно, без вступлений, без эпитетов вроде «революционный», «беспрецедентный», \
 «меняет правила игры». Английские названия продуктов, моделей и компаний оставляй латиницей как есть.
@@ -240,7 +278,7 @@ SHOW_PLAN_PROMPT = """Ты шеф-редактор подкаста «Что н�
 переводит новости в последствия для людей и рынков.
 
 В плане:
-1. Тезис выпуска: одна-две фразы, что главное за неделю и почему (если неделя проходная — так и скажи).
+1. Тезис выпуска: одна-две фразы, что главное за неделю и почему.
 2. Порядок тем: с чего начать (самая сильная тема, а не первая по списку) и как темы связаны между собой. \
 Каждая новость разбирается ровно в одной теме: связку между темами можно обозначить фразой, \
 но детали чужой темы в свою не переносить.
@@ -676,48 +714,56 @@ def fetch_youtube_context(
 
 def fetch_hn_ai(
     queries: list[str],
+    days_back: int,
     min_points: int = 30,
-    max_items: int = 10,
+    max_items: int = 40,
     covered: dict | None = None,
     new_items: dict[str, str] | None = None,
     old_mentions: list[str] | None = None,
 ) -> str:
-    """Fetch top AI stories from HackerNews RSS."""
-    parts = []
-    seen = set()
+    """Top AI stories of the period from HN (Algolia search), sorted by points."""
     covered = covered or {}
-
+    since = int((datetime.now(timezone.utc) - timedelta(days=days_back)).timestamp())
+    stories: dict[str, dict] = {}
     try:
-        client = httpx.Client()
-        import feedparser  # type: ignore
-        for query in queries:
-            url = f"https://hnrss.org/newest?q={query.replace(' ', '+')}&points={min_points}&count=8"
-            feed = feedparser.parse(url)
-            for entry in feed.entries:
-                link = entry.get("link", "")
-                if link in seen:
-                    continue
-                seen.add(link)
-                title = entry.get("title", "")
-                if f"hn:{link}" in covered:
-                    if old_mentions is not None:
-                        old_mentions.append(
-                            f"{title} (HN) — выпуск от {covered[f'hn:{link}'].get('episode', '?')}"
-                        )
-                    continue
-                summary = entry.get("summary", "")
-                score_m = re.search(r"Points:\s*(\d+)", summary)
-                score = score_m.group(1) if score_m else "?"
-                if new_items is not None:
-                    new_items[f"hn:{link}"] = title
-                parts.append(f"- {title} (HN score: {score})\n  {link}")
-                if len(parts) >= max_items:
-                    break
-            if len(parts) >= max_items:
-                break
-        client.close()
+        with httpx.Client(timeout=20) as client:
+            for query in queries:
+                resp = client.get("https://hn.algolia.com/api/v1/search", params={
+                    "query": query, "tags": "story", "hitsPerPage": 100,
+                    "numericFilters": f"created_at_i>{since},points>={min_points}",
+                    # "AI" must not prefix-match "Airbnb"
+                    "restrictSearchableAttributes": "title",
+                    "queryType": "prefixNone", "typoTolerance": "false",
+                })
+                resp.raise_for_status()
+                for hit in resp.json().get("hits", []):
+                    stories.setdefault(hit["objectID"], hit)
     except Exception as e:
         print(f"  [HN] ошибка: {e}")
+
+    parts = []
+    for hit in sorted(stories.values(), key=lambda h: h.get("points") or 0, reverse=True):
+        discussion = f"https://news.ycombinator.com/item?id={hit['objectID']}"
+        link = hit.get("url") or discussion
+        title = hit.get("title", "")
+        if f"hn:{link}" in covered:
+            if old_mentions is not None:
+                old_mentions.append(
+                    f"{title} (HN) — выпуск от {covered[f'hn:{link}'].get('episode', '?')}"
+                )
+            continue
+        if new_items is not None:
+            new_items[f"hn:{link}"] = title
+        line = (f"- {title} (HN: {hit.get('points')} points, {hit.get('num_comments') or 0} комментариев)\n"
+                f"  {link}")
+        if link != discussion:
+            line += f"\n  обсуждение: {discussion}"
+        if hit.get("story_text"):
+            text = html.unescape(re.sub(r"<[^>]+>", " ", hit["story_text"]))
+            line += f"\n  {text[:800]}"
+        parts.append(line)
+        if len(parts) >= max_items:
+            break
 
     if not parts:
         return ""
@@ -817,7 +863,7 @@ def fetch_telegram_context(
         return "", []
 
     cutoff = datetime.now(timezone.utc) - timedelta(days=days_back)
-    max_posts = int(tg_cfg.get("max_posts_per_channel", 5))
+    default_max_posts = int(tg_cfg.get("max_posts_per_channel", 15))
     min_chars = int(tg_cfg.get("min_post_chars", 200))
     parts: list[str] = []
     sources: list[str] = []
@@ -826,6 +872,7 @@ def fetch_telegram_context(
         for i, ch in enumerate(channels, 1):
             name = str(ch.get("name", "")).strip()
             category = ch.get("category", "")
+            max_posts = int(ch.get("max_posts", default_max_posts))
             if not name:
                 continue
             print(f"[TG {i}/{len(channels)}] {name} ({category})", end="", flush=True)
@@ -838,7 +885,7 @@ def fetch_telegram_context(
                 title = getattr(entity, "title", name)
 
                 posts = []
-                for msg in client.iter_messages(entity, limit=50):
+                for msg in client.iter_messages(entity, limit=200):
                     if msg.date < cutoff:
                         break
                     text = (msg.message or "").strip()
@@ -851,7 +898,7 @@ def fetch_telegram_context(
                         )
                         continue
                     link = (f"https://t.me/{username}/{msg.id}" if username
-                            else f"(приватный канал «{title}», пост {msg.id})")
+                            else f"https://t.me/c/{entity.id}/{msg.id}")
                     posts.append((key, text, link, msg.date))
                     if len(posts) >= max_posts:
                         break
@@ -888,9 +935,10 @@ def fetch_web_context(
     if hn_cfg.get("enabled", True):
         print("[Web] HackerNews...", end="", flush=True)
         hn = fetch_hn_ai(
-            queries=hn_cfg.get("queries", ["AI LLM", "AI agent"]),
+            queries=hn_cfg.get("queries", ["AI", "LLM"]),
+            days_back=days_back,
             min_points=hn_cfg.get("min_points", 30),
-            max_items=hn_cfg.get("max_items", 10),
+            max_items=hn_cfg.get("max_items", 40),
             covered=covered, new_items=new_items, old_mentions=old_mentions,
         )
         print(f" {hn.count(chr(10))} строк")
@@ -964,6 +1012,90 @@ def fetch_rss_context(
                 print(f" — {len(items)} материалов")
             except Exception as e:
                 print(f" — ошибка: {e}")
+
+    return "\n\n".join(parts), sources
+
+
+def fetch_reddit_context(
+    days_back: int,
+    reddit_cfg: dict,
+    covered: dict,
+    new_items: dict[str, str],
+    old_mentions: list[str],
+) -> tuple[str, list[str]]:
+    """Top posts of the period from subreddits via RSS (the JSON API is 403 for bots)."""
+    subs = [s for s in reddit_cfg.get("subreddits", []) if s.get("enabled", True)]
+    if not reddit_cfg.get("enabled", True) or not subs:
+        return "", []
+
+    import feedparser  # type: ignore
+    from bs4 import BeautifulSoup  # type: ignore
+
+    period = "day" if days_back <= 1 else "week" if days_back <= 7 else "month"
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days_back)
+    default_max = int(reddit_cfg.get("max_items_per_sub", 10))
+    parts: list[str] = []
+    sources: list[str] = []
+
+    with httpx.Client(timeout=20, follow_redirects=True, headers={
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/128.0 Safari/537.36",
+    }) as client:
+        for i, sub in enumerate(subs, 1):
+            name = sub.get("name", "").removeprefix("r/")
+            category = sub.get("category", "")
+            max_items = int(sub.get("max_items", default_max))
+            print(f"[Reddit {i}/{len(subs)}] r/{name}", end="", flush=True)
+            try:
+                # ~1 request/min per IP; on 429 wait for the window reset
+                for attempt in range(3):
+                    resp = client.get(f"https://www.reddit.com/r/{name}/top/.rss", params={"t": period})
+                    if resp.status_code != 429 or attempt == 2:
+                        break
+                    wait = min(float(resp.headers.get("x-ratelimit-reset", 60)) + 2, 75)
+                    print(f" (429, жду {wait:.0f}с)", end="", flush=True)
+                    time.sleep(wait)
+                resp.raise_for_status()
+                feed = feedparser.parse(resp.content)
+                items = []
+                for entry in feed.entries:
+                    ts = entry.get("published_parsed") or entry.get("updated_parsed")
+                    if ts and datetime(*ts[:6], tzinfo=timezone.utc) < cutoff:
+                        continue
+                    link = entry.get("link", "")
+                    title = entry.get("title", "").strip()
+                    if not link or not title:
+                        continue
+                    key = f"reddit:{link}"
+                    if key in covered:
+                        old_mentions.append(
+                            f"{title} (r/{name}) — выпуск от {covered[key].get('episode', '?')}"
+                        )
+                        continue
+                    body_html = (entry.get("content") or [{}])[0].get("value", "") or entry.get("summary", "")
+                    soup = BeautifulSoup(body_html, "html.parser")
+                    external = next((a["href"] for a in soup.find_all("a", href=True)
+                                     if a.get_text(strip=True) == "[link]"
+                                     and "reddit.com" not in a["href"]), "")
+                    text = soup.get_text(" ", strip=True)
+                    text = re.sub(r"submitted by .*$", "", text)
+                    text = re.sub(r"https://preview\.redd\.it/\S+", "", text).strip()
+                    new_items[key] = title
+                    line = f"- {title}\n  {link}"
+                    if external:
+                        line += f"\n  ссылка: {external}"
+                    if text:
+                        line += f"\n  {text[:1200]}"
+                    items.append(line)
+                    if len(items) >= max_items:
+                        break
+                if items:
+                    parts.append(f"## Reddit: r/{name} ({category}) — топ за период\n" + "\n".join(items))
+                    sources.append(f"Reddit r/{name}")
+                print(f" — {len(items)} постов")
+            except Exception as e:
+                print(f" — ошибка: {e}")
+            time.sleep(1)
 
     return "\n\n".join(parts), sources
 
@@ -1754,7 +1886,7 @@ def main():
         man_path = EPISODES_DIR / f"{digest_src.stem}.items.json"
         if man_path.exists():
             man = json.loads(man_path.read_text(encoding="utf-8"))
-            new_items = man.get("items", {})
+            new_items = man.get("candidates") or man.get("items", {})
             sources = man.get("sources", [])
         else:
             print(f"[digest-file] ВНИМАНИЕ: манифест {man_path} не найден — items/sources пустые")
@@ -1789,13 +1921,18 @@ def main():
             args.days, cfg.get("rss", {}), covered, new_items, old_mentions
         )
 
+        # 2b'. Reddit communities (top of the period)
+        reddit_context, reddit_sources = fetch_reddit_context(
+            args.days, cfg.get("reddit", {}), covered, new_items, old_mentions
+        )
+
         # 2c. Fetch Telegram channels (user session; includes private subscriptions)
         tg_context, tg_sources = fetch_telegram_context(
             args.days, cfg.get("telegram", {}), covered, new_items, old_mentions
         )
 
         # 3. Build combined context
-        context_parts = list(filter(None, [yt_context, web_context, rss_context, tg_context]))
+        context_parts = list(filter(None, [yt_context, web_context, reddit_context, rss_context, tg_context]))
         if not context_parts:
             print("ОШИБКА: нет материалов для подкаста")
             sys.exit(1)
@@ -1809,7 +1946,7 @@ def main():
             print(f"[covered] Пропущено как уже освещённое: {len(old_mentions)}")
 
         context = "\n\n".join(context_parts)
-        sources = yt_sources + web_sources + rss_sources + tg_sources
+        sources = yt_sources + web_sources + reddit_sources + rss_sources + tg_sources
         print(f"[context] Всего символов: {len(context)}, источников: {len(sources)}, новых материалов: {len(new_items)}")
 
     # Output stem: never overwrite same-day artifacts (published episode/digest
@@ -1848,6 +1985,10 @@ def main():
         print(f"[digest] HTML не сгенерирован: {e}")
 
     update_storylines(memo, digest, today, stem)
+
+    used_items = items_used_in_digest(new_items, digest)
+    print(f"[covered] В дайджесте процитировано {len(used_items)} из {len(new_items)} материалов "
+          f"— остальные остаются в пуле")
 
     # 4b. English version of the digest
     digest_en_ok = False
@@ -1964,7 +2105,8 @@ def main():
         "duration": duration_sec,
         "mp3": mp3_path.name,
         "sources": sources,
-        "items": new_items,
+        "items": used_items,        # merged into covered.json on publish
+        "candidates": new_items,    # everything fed to the digest (reused by --digest-file)
     }
     manifest_path = EPISODES_DIR / f"{mp3_path.stem}.items.json"
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -1982,7 +2124,7 @@ def main():
                 duration_seconds=duration_sec,
                 episode_number=ep_num,
             )
-            mark_covered(new_items, today)
+            mark_covered(used_items, today)
         except Exception as e:
             print(f"[RSS] ошибка обновления: {e}")
         try:

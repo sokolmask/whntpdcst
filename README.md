@@ -15,7 +15,7 @@ RSS, Telegram             │                       (блокнот сюжето
               аналитический дайджест ◄─────────────────────┘
                           │  humanizer
                           ▼
-              план редактора → диалог → humanizer → Gemini TTS → MP3 → RSS
+              план редактора → диалог → humanizer → разметка озвучки → Gemini TTS → MP3 → RSS
 ```
 
 1. Собирает транскрипты YouTube и топ материалы недели (источники — в `sources.yaml`)
@@ -35,15 +35,20 @@ RSS, Telegram             │                       (блокнот сюжето
    (`prompts/humanizer/SKILL.md`, MIT) + русское дополнение для диалога
    (`prompts/humanizer/ru.md`) — вычищаются генеративные обороты. Блок, который после
    правки сломал формат или потерял текст, остаётся исходным
-8. Gemini multi-speaker TTS озвучивает: Алекс (`Charon`) + Саша (`Leda`); fallback — edge-tts
-9. ffmpeg кодирует в CBR 64k MP3, RSS обновляется → Apple Podcasts подхватывает
+8. Разметка озвучки: LLM-«режиссёр» добавляет теги `<laugh>`, `<chuckle>`, `<sigh>`, `<short pause>`…
+   и манеру реплики (`САША [с усмешкой]: …`); слова не меняются — реплика, где текст поменялся,
+   откатывается к исходной. `--no-direction` отключает
+9. Gemini 3.8 Flash TTS (Interactions API, `mode: conversational`) озвучивает весь выпуск одним
+   запросом — голоса не плывут на стыках блоков: Алекс (`Charon`) + Саша (`Leda`), манера → per-turn
+   `style`; fallback — блоки, затем edge-tts
+10. ffmpeg кодирует в CBR 64k MP3, RSS обновляется → Apple Podcasts подхватывает
 
 Модель для текста — `PODCAST_LLM_MODEL` (по умолчанию `anthropic/claude-sonnet-5` через
 OpenRouter). Если OpenRouter не знает id или модель недоступна — автоматический откат на
 `anthropic/claude-sonnet-4.5`, затем `google/gemini-2.5-flash`.
 
 Отладочные файлы в `$PODCAST_DATA_DIR`: `plan_<stem>.md` (план), `script_<stem>.raw.txt`
-(сценарий до humanizer), `script_<stem>.txt` (финальный), `context_<stem>.txt` (сырые материалы). `--no-humanize` отключает проход.
+(сценарий до humanizer), `script_<stem>.plain.txt` (до разметки), `script_<stem>.txt` (финальный), `context_<stem>.txt` (сырые материалы). `--no-humanize` отключает проход.
 
 ## Запуск
 

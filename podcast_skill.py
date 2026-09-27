@@ -43,10 +43,10 @@ OPENROUTER_MODEL = os.environ.get("PODCAST_LLM_MODEL", "anthropic/claude-sonnet-
 OPENROUTER_FALLBACK_MODELS = ("anthropic/claude-sonnet-4.5", "google/gemini-2.5-flash")
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 
-GEMINI_TTS_MODEL = "gemini-3.1-flash-tts-preview"
+GEMINI_TTS_MODEL = "gemini-3.8-flash-tts"
 GEMINI_API_URL = "https://generativelanguage.googleapis.com"
 GEMINI_TTS_SAMPLE_RATE = 24000       # PCM s16le mono
-GEMINI_TTS_BLOCK_CHARS = 3500        # max script chars per TTS request
+GEMINI_TTS_BLOCK_CHARS = 8000        # fallback block size if the whole script fails in one request
 
 EDGE_TTS = "/opt/hermes/.venv/bin/edge-tts"
 DATA_DIR = Path(os.environ.get("PODCAST_DATA_DIR", "/opt/data/podcast"))
@@ -155,13 +155,19 @@ DeepSeek, Qwen и т.п. — и что их шаги значат на само�
 сигнал: то, что они делают сейчас, остальной мир будет делать через год-полтора.
 - Новости российского рынка (Сбер, Яндекс, GigaChat, MTS AI и т.п.) отдельными темами НЕ делай — \
 максимум строка в «Коротко», и только если новость заметна на мировом уровне.
+- Одна новость — одно место в дайджесте. Одно и то же событие часто приходит из нескольких источников \
+(репосты, пересказы в разных каналах, видео-обзоры): склей их в одну тему. Не разбирай одну новость \
+в двух темах и не дублируй тему строкой в «Коротко». Темы не должны пересекаться по содержанию: \
+если две новости про один тренд (например, две дешёвые китайские модели), это одна тема.
 
 Опирайся на контекст прошлых выпусков (он ниже, перед материалами недели):
-- Если новость продолжает историю, о которой мы уже говорили, подай её как развитие: что изменилось \
-по сравнению с тем, что было известно, подтвердился ли прошлый прогноз или скепсис, ускоряется тренд \
+- Если новость продолжает историю, о которой мы уже говорили, подай её как развитие, но только если \
+есть новый факт: что изменилось по сравнению с тем, что было известно, подтвердился ли прошлый прогноз или скепсис, ускоряется тренд \
 или выдыхается. Ссылайся на дату выпуска.
 - Темы из раздела «Уже освещалось в прошлых выпусках» заново НЕ разбирай — только как отсылку \
 внутри связанной новой темы.
+- Новость, которая уже была в прошлых дайджестах (см. контекст ниже) и пришла снова из другого \
+источника (репост, пересказ, обзор) без нового факта, — выкинь целиком, даже из «Коротко».
 - Не выдумывай прошлых выпусков и того, что в них говорилось: ссылайся только на то, что есть в контексте.
 
 Структура:
@@ -234,7 +240,9 @@ SHOW_PLAN_PROMPT = """Ты шеф-редактор подкаста «Что н�
 
 В плане:
 1. Тезис выпуска: одна-две фразы, что главное за неделю и почему (если неделя проходная — так и скажи).
-2. Порядок тем: с чего начать (самая сильная тема, а не первая по списку) и как темы связаны между собой.
+2. Порядок тем: с чего начать (самая сильная тема, а не первая по списку) и как темы связаны между собой. \
+Каждая новость разбирается ровно в одной теме: связку между темами можно обозначить фразой, \
+но детали чужой темы в свою не переносить.
 3. По каждой теме:
    - главный вопрос, вокруг которого строится разговор;
    - где ведущие расходятся: позиция Алекса и позиция Саши (реальное расхождение, а не «да, и ещё»);
@@ -255,8 +263,14 @@ HOSTS_BRIEF = """Ведущие:
 труда, цены, регулирование, повседневная жизнь. Держит нить между выпусками и помнит, что говорили раньше.
 
 Тон: разговор двух профессионалов, которые уважают слушателя и друг друга. Как хороший аналитический \
-подкаст, а не шоу восторгов. Ведущие спорят по существу, признают неопределённость («пока непонятно», \
-«я бы не ставил на это»), шутят редко и сухо. Термин объясняют одной фразой при первом упоминании.
+подкаст, а не шоу восторгов. Ведущие спорят по существу и всерьёз: возражают с напором, подкалывают \
+друг друга, иногда сдаются неохотно; признают неопределённость («пока непонятно», «я бы не ставил \
+на это»); юмор сухой и по делу. Термин объясняют одной фразой при первом упоминании.
+
+Цифры: это разговор на слух, а не таблица. На тему — одна-две ключевые цифры, которые несут смысл; \
+остальное словами и сравнениями: «вдвое дешевле», «в разы быстрее», «на уровне GPT-6». Не сыпать \
+процентами, бенчмарками, ценами за input/output и дробями; процент — только если без него теряется суть. \
+Большие числа округлять: «больше полутриллиона параметров», а не «552 миллиарда».
 
 Запрещено: восторги и междометия («вау», «ого», «ничего себе», «это просто невероятно», \
 «представляешь?», «мурашки»); поддакивание в начале реплики («именно!», «точно!», «абсолютно!», \
@@ -272,7 +286,7 @@ SCRIPT_PROMPT = """Ты пишешь сценарий аналитическог
 
 Правила:
 - Охвати {topics_hint}, в порядке и с акцентами из плана
-- По каждой теме: что произошло (факты и цифры) → как это работает и почему сейчас → прорыв это \
+- По каждой теме: что произошло (факты) → как это работает и почему сейчас → прорыв это \
 или нет, и по какому критерию → что это меняет для отрасли и для обычных людей (конкретный пример) → \
 что остаётся под вопросом
 - Там, где в плане есть расхождение ведущих, пусть оно звучит в разговоре и не растворяется в согласии
@@ -295,7 +309,8 @@ SCRIPT_PROMPT = """Ты пишешь сценарий аналитическог
 
 EXCERPTS_BLOCK = """
 Первоисточники по теме (выдержки из материалов недели: транскрипты, статьи, посты). Бери отсюда \
-детали, цифры, примеры и цитаты, которых нет в дайджесте, — именно они делают разговор предметным. \
+детали, механику, примеры и цитаты, которых нет в дайджесте, — именно они делают разговор предметным \
+(цифры — только ключевые, см. правило про цифры). \
 Ничего сверх написанного здесь и в дайджесте не выдумывай:
 {excerpts}
 """
@@ -312,13 +327,17 @@ SEGMENT_PROMPT = """Ты пишешь фрагмент сценария анал
 Это ОДИН ФРАГМЕНТ длинного выпуска — разговор по одной теме, примерно {words} слов диалога \
 (±15%: и сильно короче, и сильно длиннее — плохо). Объём заполняй содержанием: деталями из \
 первоисточников, механикой, примерами, спором ведущих, а не повторами и общими словами. \
-Разбирайте тему глубоко: что произошло (факты, цифры, названия) → как это работает и почему сейчас → \
+Разбирайте тему глубоко: что произошло (факты, названия, ключевая цифра) → как это работает и почему сейчас → \
 прорыв это или нет, и по какому критерию → что это меняет для отрасли и для обычных людей \
 (конкретный пример) → где подводные камни и что остаётся под вопросом. \
 Если в плане есть расхождение ведущих по этой теме, пусть оно звучит.
 
 {position}
 {continuity}
+Другие темы выпуска — у каждой свой фрагмент:
+{other_topics}
+Их новости здесь не пересказывай и не забегай вперёд: максимум короткая отсылка к уже прошедшей теме.
+
 Правила:
 - Только живой разговор — никаких списков, буллетов и markdown в репликах
 - Реплики разной длины, без поддакивания в начале
@@ -342,7 +361,8 @@ FINAL_SEGMENT_PROMPT = """Ты пишешь финальный фрагмент 
 {hosts}
 
 Это КОНЕЦ выпуска. Сначала короткий блиц по новостям ниже (одна-две реплики на новость, \
-с оценкой, а не пересказом; неважное можно пропустить), затем вывод недели из плана редактора \
+с оценкой, а не пересказом; неважное можно пропустить; к темам, уже разобранным в выпуске, \
+не возвращаться), затем вывод недели из плана редактора \
 или открытый вопрос на следующие выпуски — и всё, без долгих прощаний. \
 Весь финал — примерно {words} слов.
 {continuity}
@@ -360,7 +380,7 @@ FINAL_SEGMENT_PROMPT = """Ты пишешь финальный фрагмент 
 {korotko}"""
 
 CONDENSE_PROMPT = """Сократи фрагмент диалога подкаста примерно до {words} слов.
-Сохрани формат реплик АЛЕКС:/САША: (каждая на новой строке), самые важные факты, цифры, \
+Сохрани формат реплик АЛЕКС:/САША: (каждая на новой строке), самые важные факты, ключевые цифры, \
 оценки и расхождения ведущих.
 Убирай второстепенные ответвления и повторы, ничего нового не добавляй.
 Первая и последняя реплики должны остаться связующими — фрагмент стоит в середине выпуска.
@@ -404,6 +424,35 @@ HUMANIZE_DIGEST_PROMPT = """{skill}
 <text>
 {text}
 </text>"""
+
+VOICE_DIRECTION_PROMPT = """Ты режиссёр озвучки подкаста. Ниже — фрагмент готового сценария, диалог \
+двух ведущих, который озвучит синтез речи. Расставь в нём редкие актёрские пометки, чтобы разговор \
+звучал живо: ведущие спорят, иронизируют, иногда смеются или хмыкают.
+
+Что можно добавлять:
+1. Звуковые теги прямо в текст реплики, латиницей в угловых скобках: {tags}. \
+Другие теги не используй.
+2. Манеру произнесения — 2-4 слова в квадратных скобках сразу после имени: \
+«САША [с усмешкой]: ...», «АЛЕКС [возражая, с напором]: ...». Только там, где интонация заметно \
+отличается от обычной спокойной речи.
+
+Мера:
+- Звуковые теги — примерно в одной реплике из пяти; смех и смешок — только там, где в тексте \
+действительно ирония или шутка, не больше двух-трёх на фрагмент.
+- Манера — не больше чем у каждой четвёртой реплики, у остальных скобок нет.
+- Спор должен звучать как спор: возражение — с напором, согласие после спора — неохотно, скепсис — сухо.
+
+Жёсткие ограничения:
+- Слова реплик не меняй вообще: ничего не добавлять, не убирать и не переставлять, пунктуацию не трогать. \
+Добавляются только теги и скобки с манерой.
+- Количество и порядок реплик и имена говорящих — как в исходнике.
+- Верни только размеченный фрагмент, без пояснений.
+
+<text>
+{text}
+</text>"""
+
+VOICE_TAGS = ("<laugh>", "<chuckle>", "<sigh>", "<breath>", "<short pause>", "<long pause>")
 
 
 TRANSLATE_DIGEST_PROMPT = """Translate this Russian Markdown digest of AI news into English.
@@ -1146,9 +1195,13 @@ def generate_script_chunked(digest: str, minutes: int, plan: str, context: str =
             if tail else ""
         )
         excerpts = source_excerpts(context, body)
+        other_topics = "\n".join(
+            f"- {t}{' (уже прошла)' if j < i else ''}" for j, (t, _) in enumerate(topics) if j != i
+        ) + ("\n- блиц «Коротко» в финале" if korotko else "")
         seg = call_llm(
             SEGMENT_PROMPT.format(hosts=HOSTS_BRIEF, words=words_per_topic, position=position,
-                                  continuity=continuity, plan=plan, title=title, body=body,
+                                  continuity=continuity, other_topics=other_topics,
+                                  plan=plan, title=title, body=body,
                                   excerpts=EXCERPTS_BLOCK.format(excerpts=excerpts) if excerpts else ""),
             temperature=0.7, max_tokens=max(4096, words_per_topic * 5),
         ).strip()
@@ -1304,17 +1357,63 @@ def humanize_digest(digest: str) -> str:
     return res
 
 
+# ── Voice direction ───────────────────────────────────────────────────────────
+
+VOICE_TAG_RE = re.compile(r"\s*<[a-z -]+>")
+DIRECTED_LINE = re.compile(r"^(АЛЕКС|САША)\s*(?:\[([^\]]*)\])?:\s*(.*)$")
+
+
+def _plain_line(line: str) -> tuple[str, str] | None:
+    """(speaker, words) of a script line with voice tags and manner stripped."""
+    m = DIRECTED_LINE.match(line.strip())
+    if not m:
+        return None
+    return m.group(1), " ".join(VOICE_TAG_RE.sub(" ", m.group(3)).split())
+
+
+def direct_script(script: str) -> str:
+    """Stage 4: add TTS voice tags (<laugh>, <sigh>…) and per-line manner.
+    Words must survive untouched: any line whose text changed reverts to the original."""
+    tags = ", ".join(VOICE_TAGS)
+    out, n_directed = [], 0
+    blocks = _script_blocks(script)
+    print(f"[direction] Разметка озвучки: {len(blocks)} блоков...")
+    for i, block in enumerate(blocks, 1):
+        orig = [l for l in block.splitlines() if l.strip()]
+        try:
+            res = call_llm(VOICE_DIRECTION_PROMPT.format(tags=tags, text=block),
+                           temperature=0.5, max_tokens=max(4096, _word_count(block) * 5))
+        except Exception as e:
+            print(f"[direction]   блок {i}: ошибка ({e}) — без разметки")
+            out.extend(orig)
+            continue
+        res = [l.strip() for l in re.sub(r"</?text>", "", res).splitlines() if DIRECTED_LINE.match(l.strip())]
+        if len(res) != len(orig):
+            print(f"[direction]   блок {i}: {len(orig)}→{len(res)} реплик — без разметки")
+            out.extend(orig)
+            continue
+        kept = 0
+        for o, r in zip(orig, res):
+            if _plain_line(o) == _plain_line(r):
+                out.append(r)
+                kept += r != o
+            else:
+                out.append(o)
+        n_directed += kept
+        print(f"[direction]   блок {i}: размечено {kept} из {len(orig)} реплик")
+    print(f"[direction] Итого размечено {n_directed} реплик")
+    return "\n".join(out)
+
+
 # ── Script parsing ────────────────────────────────────────────────────────────
 
-def parse_script(script: str) -> list[tuple[str, str]]:
-    """Parse 'АЛЕКС: text' / 'САША: text' lines into (speaker, text) pairs."""
-    pattern = re.compile(r"^(АЛЕКС|САША):\s*(.+)$", re.MULTILINE)
+def parse_script(script: str) -> list[tuple[str, str, str]]:
+    """Parse 'АЛЕКС [manner]: text' lines into (speaker, text, manner) triples."""
     lines = []
-    for m in pattern.finditer(script):
-        speaker = m.group(1)
-        text = m.group(2).strip()
-        if text:
-            lines.append((speaker, text))
+    for raw in script.splitlines():
+        m = DIRECTED_LINE.match(raw.strip())
+        if m and m.group(3).strip():
+            lines.append((m.group(1), m.group(3).strip(), (m.group(2) or "").strip()))
     return lines
 
 
@@ -1326,7 +1425,7 @@ def tts_chunk(text: str, speaker: str, out_path: Path) -> bool:
     cmd = [
         EDGE_TTS,
         "--voice", voice,
-        "--text", text,
+        "--text", " ".join(VOICE_TAG_RE.sub(" ", text).split()),
         "--write-media", str(out_path),
     ]
     try:
@@ -1407,7 +1506,7 @@ def get_audio_duration(mp3_path: Path) -> int:
         return 0
 
 
-def build_audio(lines: list[tuple[str, str]], output_path: Path) -> int:
+def build_audio(lines: list[tuple[str, str, str]], output_path: Path) -> int:
     """
     Generate TTS for each line, add silence between speaker changes,
     concatenate to final MP3. Returns duration in seconds.
@@ -1423,7 +1522,7 @@ def build_audio(lines: list[tuple[str, str]], output_path: Path) -> int:
         silence_path = tmp / "silence.mp3"
         make_silence_file(SILENCE_BETWEEN_SPEAKERS_SEC, silence_path)
 
-        for i, (speaker, text) in enumerate(lines):
+        for i, (speaker, text, _) in enumerate(lines):
             print(f"  [TTS {i+1}/{total}] {speaker}: {text[:60]}...")
             chunk_path = tmp / f"chunk_{i:04d}.mp3"
 
@@ -1471,75 +1570,84 @@ def build_audio(lines: list[tuple[str, str]], output_path: Path) -> int:
 
 # ── Gemini multi-speaker TTS ──────────────────────────────────────────────────
 
-def gemini_tts_request(text: str) -> bytes | None:
-    """One multi-speaker TTS request. Returns raw PCM (s16le, 24kHz, mono)."""
+def gemini_tts_request(lines: list[tuple[str, str, str]]) -> bytes | None:
+    """One multi-speaker Interactions request. Returns raw PCM (s16le, 24kHz, mono).
+    3.8 TTS anchors on the prebuilt voice; no long style prompt (it causes drift)."""
     import base64
+    import io
+    import wave
 
+    content = []
+    for speaker, text, manner in lines:
+        ann = {"type": "speech_metadata", "speaker": speaker}
+        if manner:
+            ann["style"] = manner
+        content.append({"type": "text", "text": text, "annotations": [ann]})
     payload = {
-        "contents": [{"parts": [{"text": "Озвучь этот разговор двух ведущих подкаста живо и естественно:\n\n" + text}]}],
-        "generationConfig": {
-            "responseModalities": ["AUDIO"],
-            "speechConfig": {"multiSpeakerVoiceConfig": {"speakerVoiceConfigs": [
-                {"speaker": "АЛЕКС", "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": GEMINI_VOICE_ALEX}}},
-                {"speaker": "САША", "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": GEMINI_VOICE_SASHA}}},
-            ]}},
-        },
+        "model": GEMINI_TTS_MODEL,
+        "input": [{"type": "user_input", "content": content}],
+        "response_format": {"type": "audio"},
+        "generation_config": {"speech_config": {"mode": "conversational", "speakers": [
+            {"speaker": "АЛЕКС", "voice": GEMINI_VOICE_ALEX},
+            {"speaker": "САША", "voice": GEMINI_VOICE_SASHA},
+        ]}},
     }
     for attempt in range(3):
         try:
             resp = httpx.post(
-                f"{GEMINI_API_URL}/v1beta/models/{GEMINI_TTS_MODEL}:generateContent",
+                f"{GEMINI_API_URL}/v1beta/interactions",
                 headers={"x-goog-api-key": GEMINI_API_KEY},
                 json=payload,
-                timeout=300,
+                timeout=900,
             )
             resp.raise_for_status()
-            data = resp.json()
-            b64 = data["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
-            return base64.b64decode(b64)
+            part = next(c for step in resp.json()["steps"] for c in step.get("content", [])
+                        if c.get("type") == "audio")
+            with wave.open(io.BytesIO(base64.b64decode(part["data"]))) as w:
+                return w.readframes(w.getnframes())
         except Exception as e:
             print(f"  [Gemini TTS] попытка {attempt + 1}: {e}")
             time.sleep(5)
     return None
 
 
-def build_audio_gemini(lines: list[tuple[str, str]], output_path: Path) -> int:
+def build_audio_gemini(lines: list[tuple[str, str, str]], output_path: Path) -> int:
     """
-    Multi-speaker TTS via Gemini API: dialogue blocks → PCM → CBR 64k MP3.
+    Multi-speaker TTS via Gemini API: the whole script in one request (a single
+    take keeps voices stable), falling back to blocks → PCM → CBR 64k MP3.
     Returns duration in seconds (0 on failure — caller falls back to edge-tts).
     """
     EPISODES_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Split dialogue into blocks that fit one TTS request
-    blocks: list[str] = []
-    cur: list[str] = []
-    cur_len = 0
-    for speaker, text in lines:
-        line = f"{speaker}: {text}"
-        if cur and cur_len + len(line) > GEMINI_TTS_BLOCK_CHARS:
-            blocks.append("\n".join(cur))
-            cur, cur_len = [], 0
-        cur.append(line)
-        cur_len += len(line)
-    if cur:
-        blocks.append("\n".join(cur))
-
-    print(f"[Gemini TTS] {len(lines)} реплик → {len(blocks)} блоков")
-    silence = b"\x00" * (int(SILENCE_BETWEEN_SPEAKERS_SEC * GEMINI_TTS_SAMPLE_RATE) * 2)
-    pcm = bytearray()
-    for i, block in enumerate(blocks, 1):
-        print(f"  [Gemini TTS {i}/{len(blocks)}] {len(block)} символов...")
-        audio = gemini_tts_request(block)
-        if audio is None:
-            print(f"[Gemini TTS] блок {i} не озвучился")
-            return 0
-        if pcm:
-            pcm += silence
-        pcm += audio
+    print(f"[Gemini TTS] {GEMINI_TTS_MODEL}: {len(lines)} реплик одним запросом...")
+    pcm = gemini_tts_request(lines)
+    if pcm is None:
+        blocks: list[list[tuple[str, str, str]]] = []
+        cur_len = 0
+        for line in lines:
+            if blocks and cur_len + len(line[1]) <= GEMINI_TTS_BLOCK_CHARS:
+                blocks[-1].append(line)
+                cur_len += len(line[1])
+            else:
+                blocks.append([line])
+                cur_len = len(line[1])
+        print(f"[Gemini TTS] одним запросом не вышло — {len(blocks)} блоков")
+        silence = b"\x00" * (int(SILENCE_BETWEEN_SPEAKERS_SEC * GEMINI_TTS_SAMPLE_RATE) * 2)
+        parts = bytearray()
+        for i, block in enumerate(blocks, 1):
+            print(f"  [Gemini TTS {i}/{len(blocks)}] {len(block)} реплик...")
+            audio = gemini_tts_request(block)
+            if audio is None:
+                print(f"[Gemini TTS] блок {i} не озвучился")
+                return 0
+            if parts:
+                parts += silence
+            parts += audio
+        pcm = bytes(parts)
 
     with tempfile.NamedTemporaryFile(suffix=".pcm", delete=False) as f:
         pcm_path = Path(f.name)
-        f.write(bytes(pcm))
+        f.write(pcm)
 
     cmd = [
         "ffmpeg", "-y",
@@ -1582,6 +1690,8 @@ def main():
                              "items/sources взять из манифеста того же прогона")
     parser.add_argument("--no-humanize", action="store_true",
                         help="Не прогонять дайджест и сценарий через humanizer (для отладки)")
+    parser.add_argument("--no-direction", action="store_true",
+                        help="Без разметки озвучки (<laugh>, манера реплик)")
     args = parser.parse_args()
 
     today = datetime.now().strftime("%Y-%m-%d")
@@ -1732,6 +1842,11 @@ def main():
     if not args.no_humanize:
         (DATA_DIR / f"script_{stem}.raw.txt").write_text(script, encoding="utf-8")
         script = humanize_script(script)
+
+    # 5c. Stage 4: voice direction (tags + manner), words untouched
+    if not args.no_direction:
+        (DATA_DIR / f"script_{stem}.plain.txt").write_text(script, encoding="utf-8")
+        script = direct_script(script)
 
     script_path.write_text(script, encoding="utf-8")
     print(f"[script] Сохранён → {script_path}")

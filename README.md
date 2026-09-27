@@ -43,9 +43,10 @@ RSS, Telegram             │                       (блокнот сюжето
    `style`; fallback — блоки, затем edge-tts
 10. ffmpeg кодирует в CBR 64k MP3, RSS обновляется → Apple Podcasts подхватывает
 
-Модель для текста — `PODCAST_LLM_MODEL` (по умолчанию `anthropic/claude-sonnet-5` через
-OpenRouter). Если OpenRouter не знает id или модель недоступна — автоматический откат на
-`anthropic/claude-sonnet-4.5`, затем `google/gemini-2.5-flash`.
+Модель для текста — `PODCAST_LLM_MODEL` (по умолчанию `gemini-3.8-flash` через Gemini API,
+тот же `GEMINI_API_KEY`, что и для TTS — биллинг в Google Cloud-проекте ключа). Id со слешем
+(`anthropic/claude-sonnet-5`) идут через OpenRouter. Если модель недоступна — автоматический откат
+на `gemini-pro-latest`, затем `anthropic/claude-sonnet-5` (OpenRouter).
 
 Отладочные файлы в `$PODCAST_DATA_DIR`: `plan_<stem>.md` (план), `script_<stem>.raw.txt`
 (сценарий до humanizer), `script_<stem>.plain.txt` (до разметки), `script_<stem>.txt` (финальный), `context_<stem>.txt` (сырые материалы). `--no-humanize` отключает проход.

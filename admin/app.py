@@ -211,10 +211,10 @@ def _site_episode_urls() -> set[str]:
 
 
 def _llm_translate(title: str, body: str, dst_lang: str) -> tuple[str, str]:
-    """Translate a post via OpenRouter. Returns (title, body)."""
-    key = os.environ.get("OPENROUTER_API_KEY", "")
+    """Translate a post via Gemini API. Returns (title, body)."""
+    key = os.environ.get("GEMINI_API_KEY", "")
     if not key:
-        raise HTTPException(500, "OPENROUTER_API_KEY не задан")
+        raise HTTPException(500, "GEMINI_API_KEY не задан")
     lang_name = {"en": "English", "ru": "Russian"}[dst_lang]
     prompt = (
         f"Translate this blog post into {lang_name}. Preserve the markdown structure exactly: "
@@ -224,15 +224,16 @@ def _llm_translate(title: str, body: str, dst_lang: str) -> tuple[str, str]:
         f"then the translated markdown body. No commentary.\n\nTITLE: {title}\n\nBODY:\n{body}"
     )
     resp = httpx.post(
-        "https://openrouter.ai/api/v1/chat/completions",
-        headers={"Authorization": f"Bearer {key}"},
-        json={"model": "google/gemini-2.5-flash", "temperature": 0.2,
-              "max_tokens": 8192,
-              "messages": [{"role": "user", "content": prompt}]},
-        timeout=180,
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent",
+        headers={"x-goog-api-key": key},
+        json={"contents": [{"role": "user", "parts": [{"text": prompt}]}],
+              # thinking tokens count against maxOutputTokens
+              "generationConfig": {"temperature": 0.2, "maxOutputTokens": 8192 + 16384}},
+        timeout=300,
     )
     resp.raise_for_status()
-    content = resp.json()["choices"][0]["message"]["content"].strip()
+    parts = resp.json()["candidates"][0]["content"]["parts"]
+    content = "".join(p.get("text", "") for p in parts if not p.get("thought")).strip()
     lines = content.splitlines()
     t_title = re.sub(r"^TITLE:\s*", "", lines[0]).strip()
     try:

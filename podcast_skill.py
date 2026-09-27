@@ -11,8 +11,8 @@ Usage:
 
 Environment variables:
     YOUTUBE_API_KEY      — YouTube Data API v3
-    OPENROUTER_API_KEY   — OpenRouter API key
-    GEMINI_API_KEY       — Google AI Studio key (multi-speaker TTS; fallback: edge-tts)
+    GEMINI_API_KEY       — Google AI Studio key: text LLM + multi-speaker TTS (fallback: edge-tts)
+    OPENROUTER_API_KEY   — OpenRouter API key (only for model ids with a "/", e.g. anthropic/...)
     PODCAST_DATA_DIR     — data dir override (default /opt/data/podcast)
 """
 
@@ -36,11 +36,12 @@ YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY", "")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
-# Analysis and writing need a strong model. If the primary id is unknown to
-# OpenRouter (or unavailable), call_llm walks down the fallback list; Flash
-# stays last as the cheap always-there option.
-OPENROUTER_MODEL = os.environ.get("PODCAST_LLM_MODEL", "anthropic/claude-sonnet-5")
-OPENROUTER_FALLBACK_MODELS = ("anthropic/claude-sonnet-4.5", "google/gemini-2.5-flash")
+# Text LLM. Bare ids (gemini-...) go to the Gemini API with GEMINI_API_KEY
+# (billed to the Google Cloud project); ids with a "/" go to OpenRouter.
+# If a model is unknown or unavailable, call_llm walks down the fallback list.
+LLM_MODEL = os.environ.get("PODCAST_LLM_MODEL", "gemini-3.8-flash")
+LLM_FALLBACK_MODELS = ("gemini-pro-latest", "anthropic/claude-sonnet-5")
+GEMINI_THINKING_HEADROOM = 16384   # thinking tokens count against maxOutputTokens
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 GEMINI_TTS_MODEL = "gemini-3.8-flash-tts"
@@ -969,49 +970,91 @@ def fetch_rss_context(
 
 # ── LLM ───────────────────────────────────────────────────────────────────────
 
-_dead_models: set[str] = set()   # ids OpenRouter rejected this run — don't retry them
+_dead_models: set[str] = set()   # ids rejected this run (unknown id, no key, no credit) — don't retry them
+
+
+def _gemini_generate(client: httpx.Client, model: str, prompt: str, temperature: float,
+                     max_tokens: int) -> httpx.Response:
+    return client.post(
+        f"{GEMINI_API_URL}/v1beta/models/{model}:generateContent",
+        headers={"x-goog-api-key": GEMINI_API_KEY},
+        json={
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "temperature": temperature,
+                "maxOutputTokens": min(max_tokens + GEMINI_THINKING_HEADROOM, 65536),
+            },
+        },
+    )
+
+
+def _gemini_text(data: dict, model: str) -> str:
+    cand = (data.get("candidates") or [{}])[0]
+    text = "".join(p.get("text", "") for p in cand.get("content", {}).get("parts", [])
+                   if not p.get("thought"))
+    if cand.get("finishReason") == "MAX_TOKENS":
+        print(f"[LLM] {model}: ответ обрезан по лимиту токенов")
+    return text
+
+
+def _openrouter_generate(client: httpx.Client, model: str, prompt: str, temperature: float,
+                         max_tokens: int) -> httpx.Response:
+    return client.post(
+        OPENROUTER_API_URL,
+        headers={
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": BASE_URL,
+            "X-Title": "AI Podcast Generator",
+        },
+        json={
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        },
+    )
 
 
 def call_llm(prompt: str, temperature: float, max_tokens: int = 4096) -> str:
-    """Call OpenRouter chat completions, return message content.
-    Walks down the model list when OpenRouter rejects a model id; retries
+    """Call the text LLM (Gemini API or OpenRouter by model id), return the text.
+    Walks down the model list when a provider rejects a model; retries
     transient failures (429/5xx) once per model."""
-    if not OPENROUTER_API_KEY:
-        sys.exit("ERROR: OPENROUTER_API_KEY not set")
-
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "Content-Type": "application/json",
-        "HTTP-Referer": BASE_URL,
-        "X-Title": "AI Podcast Generator",
-    }
-    models = [m for m in dict.fromkeys((OPENROUTER_MODEL, *OPENROUTER_FALLBACK_MODELS))
-              if m not in _dead_models]
+    models = [m for m in dict.fromkeys((LLM_MODEL, *LLM_FALLBACK_MODELS)) if m not in _dead_models]
     last_error = ""
-    with httpx.Client(timeout=300) as client:
+    with httpx.Client(timeout=600) as client:
         for model in models:
-            payload = {
-                "model": model,
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": max_tokens,
-                "temperature": temperature,
-            }
+            via_openrouter = "/" in model
+            if not (OPENROUTER_API_KEY if via_openrouter else GEMINI_API_KEY):
+                _dead_models.add(model)
+                last_error = f"{model}: нет ключа"
+                continue
+            generate = _openrouter_generate if via_openrouter else _gemini_generate
             for attempt in range(2):
-                resp = client.post(OPENROUTER_API_URL, json=payload, headers=headers)
+                try:
+                    resp = generate(client, model, prompt, temperature, max_tokens)
+                except httpx.HTTPError as e:
+                    last_error = f"{model}: {e!r}"
+                    resp = None
+                    time.sleep(15)
+                    continue
                 if resp.status_code == 429 or resp.status_code >= 500:
                     last_error = f"{model}: HTTP {resp.status_code}"
                     time.sleep(15)
                     continue
                 break
-            if resp.status_code in (400, 403, 404):
+            if resp is None:
+                continue
+            if resp.status_code in (400, 402, 403, 404):
                 last_error = f"{model}: HTTP {resp.status_code} {resp.text[:200]}"
                 print(f"[LLM] {last_error} — пробую следующую модель")
-                if resp.status_code == 404 or "model" in resp.text.lower():
-                    _dead_models.add(model)
+                _dead_models.add(model)
                 continue
             if resp.status_code != 200:
                 continue
-            content = resp.json()["choices"][0]["message"].get("content") or ""
+            data = resp.json()
+            content = (data["choices"][0]["message"].get("content") or "") if via_openrouter \
+                else _gemini_text(data, model)
             if content.strip():
                 return content
             last_error = f"{model}: пустой ответ"

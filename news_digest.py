@@ -3,7 +3,7 @@
 
 Собирает посты за последние N часов из каналов, перечисленных в
 sources.news.yaml (лежит в NEWS_DATA_DIR — личный список, не в репо),
-генерирует компактный дайджест (Израиль / Россия / Мир) через OpenRouter
+генерирует компактный дайджест (Израиль / Россия / Мир) через Gemini API
 и шлёт в Telegram той же user-сессией (по умолчанию — Saved Messages).
 
 Usage:
@@ -14,7 +14,7 @@ Usage:
 
 Environment variables:
     TELEGRAM_API_ID / TELEGRAM_API_HASH / TELEGRAM_SESSION — user session (tg_login.py)
-    OPENROUTER_API_KEY   — OpenRouter API key
+    GEMINI_API_KEY       — Gemini API key (Google AI Studio)
     NEWS_DATA_DIR        — data dir override (default /opt/data/news)
 """
 
@@ -29,9 +29,9 @@ from pathlib import Path
 
 import httpx
 
-OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
-OPENROUTER_MODEL = "google/gemini-2.5-flash"
-OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_MODEL = os.environ.get("NEWS_LLM_MODEL", "gemini-3.8-flash")
+GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 
 DATA_DIR = Path(os.environ.get("NEWS_DATA_DIR", "/opt/data/news"))
 SOURCES_PATH = DATA_DIR / "sources.news.yaml"
@@ -195,26 +195,21 @@ def build_context(sections: dict[str, list[str]]) -> str:
 
 
 def generate_digest(context: str, hours_back: int) -> str:
-    if not OPENROUTER_API_KEY:
-        sys.exit("ОШИБКА: OPENROUTER_API_KEY не задан")
+    if not GEMINI_API_KEY:
+        sys.exit("ОШИБКА: GEMINI_API_KEY не задан")
     date = israel_now().strftime("%d.%m.%Y")
     print(f"[LLM] Генерирую дайджест ({len(context)} символов контекста)...")
     payload = {
-        "model": OPENROUTER_MODEL,
-        "messages": [{"role": "user", "content": NEWS_PROMPT.format(
-            hours=hours_back, date=date, context=context)}],
-        "max_tokens": 4096,
-        "temperature": 0.3,
+        "contents": [{"role": "user", "parts": [{"text": NEWS_PROMPT.format(
+            hours=hours_back, date=date, context=context)}]}],
+        # thinking tokens count against maxOutputTokens
+        "generationConfig": {"maxOutputTokens": 4096 + 16384, "temperature": 0.3},
     }
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "Content-Type": "application/json",
-        "X-Title": "Morning News Digest",
-    }
-    with httpx.Client(timeout=180) as client:
-        resp = client.post(OPENROUTER_API_URL, json=payload, headers=headers)
+    with httpx.Client(timeout=300) as client:
+        resp = client.post(GEMINI_API_URL, json=payload, headers={"x-goog-api-key": GEMINI_API_KEY})
         resp.raise_for_status()
-        digest = resp.json()["choices"][0]["message"]["content"].strip()
+        parts = resp.json()["candidates"][0]["content"]["parts"]
+        digest = "".join(p.get("text", "") for p in parts if not p.get("thought")).strip()
     print(f"[LLM] Дайджест готов: {len(digest)} символов")
     return digest
 

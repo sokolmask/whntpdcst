@@ -5,7 +5,7 @@
 youtube:
   channels:
     - {handle: "@NateBJones",           category: "AI Strategy"}
-    - {handle: "@aiexplained",          category: "AI News"}
+    - {handle: "@aiexplained-official", category: "AI News"}
     - {handle: "@aiDotEngineer",        category: "AI Engineering"}
     - {handle: "@AndrejKarpathy",       category: "ML/AI Deep Dives"}
     - {handle: "@YannicKilcher",        category: "ML Research"}
@@ -19,7 +19,7 @@ youtube:
     - {handle: "@GosuCoder",            category: "AI Agents"}
     - {handle: "@AIJasonZ",             category: "AI Products"}
     - {handle: "@NetworkChuck",         category: "IT/DevOps"}
-    - {handle: "@ThePragmaticEngineer", category: "Tech Industry"}
+    - {handle: "@pragmaticengineer",    category: "Tech Industry"}
     - {handle: "@ycombinator",          category: "Startups"}
     - {handle: "@TechAviv",             category: "Israel Startups"}
     - {handle: "@ChinaTalkMedia",       category: "China Tech/AI"}

@@ -4,10 +4,11 @@
 Собирает посты за последние N часов из каналов, перечисленных в
 sources.news.yaml (лежит в NEWS_DATA_DIR — личный список, не в репо),
 генерирует компактный дайджест (Израиль / Россия / Мир) через OpenRouter
-и шлёт в Telegram Saved Messages той же user-сессией.
+и шлёт в Telegram той же user-сессией (по умолчанию — Saved Messages).
 
 Usage:
     python news_digest.py                  # last 24h → Saved Messages
+    python news_digest.py --to -100123456  # → указанный чат/канал
     python news_digest.py --hours 12
     python news_digest.py --dry-run        # print digest, don't send / mark seen
 
@@ -41,6 +42,8 @@ SEEN_KEEP_DAYS = 7
 MAX_CONTEXT_CHARS = 120000
 TG_MESSAGE_LIMIT = 3800  # under Telegram's 4096, leaves room for entities
 
+SECTION_DIVIDER = "━━━━━━━━━━━━━━"
+
 SECTION_ORDER = ["израиль", "россия", "мир"]
 SECTION_TITLES = {
     "израиль": "🇮🇱 Израиль и Ближний Восток",
@@ -55,7 +58,9 @@ NEWS_PROMPT = """Ты — редактор утреннего новостног
 
 Правила:
 - Три секции строго в этом порядке: **🇮🇱 Израиль и Ближний Восток**, **🇷🇺 Россия**, **🌍 Мир**
+- Заголовок секции — на отдельной строке, ровно в таком виде, с пустой строкой после
 - В каждой секции 3-6 главных тем. Каждая тема — один пункт: строка «— **суть в 3-5 словах:** 1-2 предложения конкретных фактов (кто, что, где, цифры)»
+- Между пунктами — пустая строка
 - Одна и та же новость из разных каналов — ОДИН пункт, объедини детали
 - В конце пункта ссылка на самый информативный пост: [название канала](https://t.me/...)
 - Посты на иврите и английском переводи на русский
@@ -229,17 +234,29 @@ def split_for_telegram(text: str, limit: int = TG_MESSAGE_LIMIT) -> list[str]:
     return chunks
 
 
-def send_to_saved_messages(digest: str) -> None:
+def decorate_digest(digest: str) -> str:
+    """Разделители перед секциями + нормализация пустых строк (не полагаемся на LLM)."""
+    for title in SECTION_TITLES.values():
+        header = f"**{title}**"
+        digest = digest.replace(header, f"{SECTION_DIVIDER}\n{header}")
+    digest = re.sub(rf"\n*{re.escape(SECTION_DIVIDER)}\n*", f"\n\n{SECTION_DIVIDER}\n", digest)
+    digest = re.sub(r"\n{3,}", "\n\n", digest)
+    return digest.strip()
+
+
+def send_digest(digest: str, target: str) -> None:
     from telethon.sync import TelegramClient
     from telethon.sessions import StringSession
     api_id = os.environ.get("TELEGRAM_API_ID", "")
     api_hash = os.environ.get("TELEGRAM_API_HASH", "")
     session = os.environ.get("TELEGRAM_SESSION", "")
+    peer = int(target) if re.fullmatch(r"-?\d+", target) else target
     chunks = split_for_telegram(digest)
     with TelegramClient(StringSession(session), int(api_id), api_hash) as client:
+        entity = client.get_entity(peer)
         for i, chunk in enumerate(chunks, 1):
-            client.send_message("me", chunk, parse_mode="md", link_preview=False)
-            print(f"[send] Сообщение {i}/{len(chunks)} → Saved Messages")
+            client.send_message(entity, chunk, parse_mode="md", link_preview=False)
+            print(f"[send] Сообщение {i}/{len(chunks)} → {target}")
             time.sleep(1)
 
 
@@ -247,6 +264,7 @@ def main():
     parser = argparse.ArgumentParser(description="Утренний новостной дайджест из Telegram")
     parser.add_argument("--hours", type=int, default=24, help="За сколько часов брать посты (default 24)")
     parser.add_argument("--dry-run", action="store_true", help="Напечатать дайджест, не отправлять и не помечать seen")
+    parser.add_argument("--to", default="me", help='Чат назначения: id (-100...) или username (default "me" = Saved Messages)')
     args = parser.parse_args()
 
     now = israel_now()
@@ -264,7 +282,7 @@ def main():
         return
     print(f"[context] Всего символов: {len(context)}, новых постов: {len(new_keys)}")
 
-    digest = generate_digest(context, args.hours)
+    digest = decorate_digest(generate_digest(context, args.hours))
 
     DIGESTS_DIR.mkdir(parents=True, exist_ok=True)
     digest_path = DIGESTS_DIR / f"{now.strftime('%Y-%m-%d')}.md"
@@ -278,7 +296,7 @@ def main():
         print("[dry-run] Не отправляю и не помечаю seen. Готово.")
         return
 
-    send_to_saved_messages(digest)
+    send_digest(digest, args.to)
     save_seen(seen, new_keys)
     print("=== Готово ===")
 

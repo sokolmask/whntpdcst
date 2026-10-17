@@ -61,6 +61,8 @@ VOICE_ALEX = "ru-RU-DmitryNeural"   # Алекс — male
 VOICE_SASHA = "ru-RU-SvetlanaNeural"  # Саша — female
 GEMINI_VOICE_ALEX = "Charon"   # male
 GEMINI_VOICE_SASHA = "Leda"    # female
+GEMINI_VOICE_GUEST = "Puck"    # male, guest episodes
+GEMINI_VOICES = {"АЛЕКС": GEMINI_VOICE_ALEX, "САША": GEMINI_VOICE_SASHA, "ГОСТЬ": GEMINI_VOICE_GUEST}
 
 SILENCE_BETWEEN_SPEAKERS_SEC = 0.3
 
@@ -78,6 +80,7 @@ EXTRA_SOURCES_PATH = DATA_DIR / "sources.extra.yaml"   # user additions from adm
 COVERED_PATH = DATA_DIR / "covered.json"               # items already covered in published episodes
 MEMORY_DIR = DATA_DIR / "memory"                       # running storyline notes, one file per episode stem
 HUMANIZER_DIR = Path(__file__).parent / "prompts" / "humanizer"  # vendored skill + Russian addendum
+FORMATS_PATH = Path(__file__).parent / "prompts" / "formats.md"   # episode format library for the showrunner
 
 
 def load_sources() -> dict:
@@ -271,53 +274,103 @@ STORYLINES_PROMPT = """Ты ведёшь рабочий блокнот анал�
 Новый дайджест:
 {digest}"""
 
-SHOW_PLAN_PROMPT = """Ты шеф-редактор подкаста «Что нового в AI». Перед записью составь короткий план \
-разговора для двух ведущих по дайджесту ниже (не больше ~700 слов, на русском).
+SHOW_PLAN_PROMPT = """Ты шоураннер и выпускающий редактор подкаста «Что нового в AI». Перед записью ты \
+решаешь, КАК будет сделан этот выпуск: выбираешь формат из библиотеки под материал недели и пишешь план \
+разговора (на русском, не больше ~900 слов).
 
-Ведущие: АЛЕКС — инженер и скептик, разбирает механику и цифры; САША — аналитик технологий и общества, \
-переводит новости в последствия для людей и рынков.
+{hosts}
+
+{formats}
+{recent_formats}
+Темы дайджеста (номера нужны для строки про гостя):
+{topics}
+
+Начни ответ строго с шапки из трёх строк, потом план:
+ФОРМАТ: <id формата из библиотеки>; рубрики: <названия рубрик или «нет»>
+ГОСТЬ: <«нет» или: Имя — кто он, характер, позиция, манера речи, пара фирменных оборотов; одной-двумя фразами>
+ГОСТЬ В ТЕМАХ: <«все», номера тем через запятую или «нет»>
+
+Гость бывает только в формате guest. Гость — мужчина (голос в озвучке мужской), имя короткое и русское.
 
 В плане:
-1. Тезис выпуска: одна-две фразы, что главное за неделю и почему.
-2. Порядок тем: с чего начать (самая сильная тема, а не первая по списку) и как темы связаны между собой. \
+1. Почему этот формат подходит этой неделе: одна фраза.
+2. Тезис выпуска: одна-две фразы, что главное за неделю и почему.
+3. Порядок тем: с чего начать (самая сильная тема, а не первая по списку) и как темы связаны между собой. \
 Каждая новость разбирается ровно в одной теме: связку между темами можно обозначить фразой, \
 но детали чужой темы в свою не переносить.
-3. По каждой теме:
+4. По каждой теме:
    - главный вопрос, вокруг которого строится разговор;
-   - где ведущие расходятся: позиция Алекса и позиция Саши (реальное расхождение, а не «да, и ещё»);
+   - где участники расходятся: позиции Алекса, Саши (и гостя, если он в теме) — реальное расхождение, \
+а не «да, и ещё»;
+   - чем это смешно или иронично: конкретная шутка, подколка, абсурдное сравнение, вытекающее из самой новости;
    - связка с прошлыми выпусками, если она есть в контексте (с датой);
    - один конкретный пример из жизни обычного человека: кого это коснётся и как;
    - одна неочевидная мысль, до которой не додумается пересказ пресс-релиза.
-4. Чем закончить: вывод или открытый вопрос, который стоит проверить в следующих выпусках.
+5. Сквозная шутка или подколка выпуска, которая вернётся два-три раза, — если формат это позволяет.
+6. Чем закончить: вывод или открытый вопрос, который стоит проверить в следующих выпусках.
 {focus_block}
 {history}
 
 Дайджест недели:
 {digest}"""
 
-HOSTS_BRIEF = """Ведущие:
-АЛЕКС — ML-инженер с опытом продакшена, спокойный скептик. Спрашивает «что именно измерили», \
-«сколько это стоит», «где это уже работает, а не в демо». Объясняет механизм простыми словами.
-САША — аналитик, пишет о технологиях, экономике и обществе. Переводит новость в последствия: рынок \
-труда, цены, регулирование, повседневная жизнь. Держит нить между выпусками и помнит, что говорили раньше.
+SHOW_FORMAT_OVERRIDE = """
+Формат этого выпуска задан заранее: {format}. Выбери его и строй план под него.
+"""
 
-Тон: разговор двух профессионалов, которые уважают слушателя и друг друга. Как хороший аналитический \
-подкаст, а не шоу восторгов. Ведущие спорят по существу и всерьёз: возражают с напором, подкалывают \
-друг друга, иногда сдаются неохотно; признают неопределённость («пока непонятно», «я бы не ставил \
-на это»); юмор сухой и по делу. Термин объясняют одной фразой при первом упоминании.
+HOSTS_BRIEF = """Ведущие — постоянные персонажи шоу: у них есть характер, общая история и своя манера.
+
+АЛЕКС — ML-инженер, пятнадцать лет в продакшене, пережил три волны хайпа и ни одну не простил. Скептик \
+с сухим, слегка занудным юмором; любит бытовые аналогии из ремонта и автомобилей. Спрашивает «что именно \
+измерили», «сколько это стоит», «где это работает, а не в демо». Втайне восхищается хорошей инженерией \
+и выдаёт это неохотно. Слабость: уходит в технические дебри, и Саша его оттуда вытаскивает.
+САША — аналитик, пишет о технологиях, экономике и обществе. Быстрая, ироничная, любит парадоксы и \
+неудобные вопросы: кто за это платит, кто потеряет работу, что скажут регуляторы. Держит нить между \
+выпусками, помнит, кто что прогнозировал, и не упускает случая напомнить Алексу его промахи. Шутит \
+смелее Алекса, иногда на грани; смеётся над его аналогиями, а потом сама же ими пользуется.
+
+Отношения: давно работают вместе, на «ты», подкалывают друг друга по-дружески. Спорят по существу и \
+всерьёз: возражают с напором, сдаются неохотно («ладно, тут ты прав, но это ненадолго»).
+
+Живость — главное требование:
+- Юмор обязателен: ирония, подколки, самоирония, абсурдные сравнения, чёрный юмор про конец света и \
+«AI заберёт всю работу». Шутки могут быть простыми и даже немного кринжовыми — живые люди так и шутят. \
+На каждую тему — хотя бы один смешной или ироничный момент, вытекающий из самой новости.
+- На шутку реагируют как люди: смеются, хмыкают, отвечают подколкой («ну конечно», «очень смешно»). \
+Короткие реакции и перебивки («погоди-погоди», «ну нет», «ха») — нормально, но не в каждой реплике.
+- Отступления: иногда кто-то уходит в короткое рассуждение — что это говорит о людях, о компаниях, \
+о нас самих, — и разговор возвращается к теме.
+- Неровность: короткое возражение, потом длинное объяснение, самопоправка («точнее, не так…»), \
+мысль, которую не договорил один и подхватил другой.
+- Признают неопределённость («пока непонятно», «я бы не ставил на это») — никто не играет всезнайку.
+- Слушатель в теме: базу не разжёвывать, термин — одной фразой при первом упоминании.
 
 Цифры: это разговор на слух, а не таблица. На тему — одна-две ключевые цифры, которые несут смысл; \
 остальное словами и сравнениями: «вдвое дешевле», «в разы быстрее», «на уровне GPT-6». Не сыпать \
 процентами, бенчмарками, ценами за input/output и дробями; процент — только если без него теряется суть. \
 Большие числа округлять: «больше полутриллиона параметров», а не «552 миллиарда».
 
-Запрещено: восторги и междометия («вау», «ого», «ничего себе», «это просто невероятно», \
-«представляешь?», «мурашки»); поддакивание в начале реплики («именно!», «точно!», «абсолютно!», \
-«отличный вопрос»); подводки («давай разберёмся», «вот тут самое интересное», «и знаешь, что важно?»); \
-конструкции «это не просто X, а Y»; штампы «меняет правила игры», «новая эра», «революция», \
-«будущее уже здесь», «время покажет»; формальные переходы «теперь поговорим о…»."""
+Запрещено (так говорит робот, а не человек): восторги-пустышки («вау», «ого», «ничего себе», \
+«это просто невероятно», «представляешь?», «мурашки»); поддакивание в начале реплики («именно!», \
+«точно!», «абсолютно!», «отличный вопрос»); подводки («давай разберёмся», «вот тут самое интересное», \
+«и знаешь, что важно?»); конструкции «это не просто X, а Y»; штампы «меняет правила игры», «новая эра», \
+«революция», «будущее уже здесь», «время покажет»; формальные переходы «теперь поговорим о…»."""
 
-SCRIPT_PROMPT = """Ты пишешь сценарий аналитического подкаста «Что нового в AI» с двумя ведущими.
+GUEST_BRIEF = """
+Гость в студии: {guest}
+В сценарии его реплики помечаются «ГОСТЬ:», ведущие обращаются к нему по имени. Гость — полноценный \
+участник со своей позицией: спорит, шутит, иногда ставит ведущих в тупик, а не поддакивает и не читает \
+лекцию. Говорит не больше трети разговора. Его мнения — его, факты — только из материалов. {guest_position}"""
+
+GUEST_POSITIONS = {
+    "intro": "Гость появляется в этом фрагменте впервые: ведущие коротко представляют его одной фразой, без регалий.",
+    "stay": "Гость уже в студии с прошлой темы, заново его не представлять.",
+    "intro_last": "Гость появляется в этом фрагменте впервые и после него уходит: ведущие коротко "
+                  "представляют его, а в конце фрагмента — короткое прощание с ним.",
+    "last": "Гость уже в студии; после этого фрагмента он уходит — в конце коротко попрощайтесь с ним.",
+}
+
+SCRIPT_PROMPT = """Ты пишешь сценарий подкаста «Что нового в AI».
 
 {hosts}
 
@@ -325,10 +378,12 @@ SCRIPT_PROMPT = """Ты пишешь сценарий аналитическог
 
 Правила:
 - Охвати {topics_hint}, в порядке и с акцентами из плана
-- По каждой теме: что произошло (факты) → как это работает и почему сейчас → прорыв это \
-или нет, и по какому критерию → что это меняет для отрасли и для обычных людей (конкретный пример) → \
-что остаётся под вопросом
-- Там, где в плане есть расхождение ведущих, пусть оно звучит в разговоре и не растворяется в согласии
+- Выпуск сделан в формате из плана шоураннера: драматургия формата важнее шаблона
+- По каждой теме нужны: факты, механика и почему сейчас, прорыв это или нет и по какому критерию, \
+что это меняет (конкретный пример), что остаётся под вопросом. Это ингредиенты, а не порядок реплик: \
+тему можно начать с шутки, спора, бытового примера или вопроса гостя
+- Шутки, подколки и сквозная шутка из плана должны прозвучать
+- Там, где в плане есть расхождение, пусть оно звучит в разговоре и не растворяется в согласии
 - Связки с прошлыми выпусками — одной-двумя фразами, с датой, без пересказа
 - Реплики разной длины: иногда одно короткое возражение, иногда развёрнутое объяснение
 - Только живой разговор — никаких списков, буллетов, markdown и ремарок в репликах
@@ -336,11 +391,9 @@ SCRIPT_PROMPT = """Ты пишешь сценарий аналитическог
 - Заканчивай коротким выводом недели или открытым вопросом, без долгих прощаний
 - Формат строго (каждая реплика на новой строке, без пустых строк между репликами одного блока):
 
-АЛЕКС: текст реплики
-САША: текст реплики
-АЛЕКС: текст реплики
+{speakers}
 {focus_block}
-План редактора:
+План шоураннера:
 {plan}
 
 Дайджест недели:
@@ -359,17 +412,18 @@ SCRIPT_FOCUS_NOTE = """
 остальные обсуждайте короче.
 """
 
-SEGMENT_PROMPT = """Ты пишешь фрагмент сценария аналитического подкаста «Что нового в AI» с двумя ведущими.
+SEGMENT_PROMPT = """Ты пишешь фрагмент сценария подкаста «Что нового в AI».
 
 {hosts}
 
 Это ОДИН ФРАГМЕНТ длинного выпуска — разговор по одной теме, примерно {words} слов диалога \
 (±15%: и сильно короче, и сильно длиннее — плохо). Объём заполняй содержанием: деталями из \
-первоисточников, механикой, примерами, спором ведущих, а не повторами и общими словами. \
-Разбирайте тему глубоко: что произошло (факты, названия, ключевая цифра) → как это работает и почему сейчас → \
-прорыв это или нет, и по какому критерию → что это меняет для отрасли и для обычных людей \
-(конкретный пример) → где подводные камни и что остаётся под вопросом. \
-Если в плане есть расхождение ведущих по этой теме, пусть оно звучит.
+первоисточников, механикой, примерами, спором, шутками, а не повторами и общими словами. \
+Разговор строится по формату выпуска из плана шоураннера. В теме нужны: факты (названия, ключевая цифра), \
+как это работает и почему сейчас, прорыв это или нет и по какому критерию, что это меняет для отрасли \
+и для обычных людей (конкретный пример), подводные камни. Это ингредиенты, а не порядок реплик: \
+начать можно с шутки, спора, бытового примера, вопроса гостя. \
+Расхождение и шутки из плана по этой теме должны прозвучать.
 
 {position}
 {continuity}
@@ -380,14 +434,14 @@ SEGMENT_PROMPT = """Ты пишешь фрагмент сценария анал
 Правила:
 - Только живой разговор — никаких списков, буллетов и markdown в репликах
 - Реплики разной длины, без поддакивания в начале
+- Сквозная шутка из плана, если она есть, может мелькнуть, но не в каждом фрагменте
 - НЕ завершай выпуск: не прощайся, не подводи итоги недели — после этой темы разговор продолжится
 - Последняя реплика фрагмента — естественная точка, после которой можно перейти к новой теме
 - Формат строго (каждая реплика на новой строке):
 
-АЛЕКС: текст реплики
-САША: текст реплики
+{speakers}
 
-План редактора (весь выпуск; тебе нужна часть про эту тему и общий тезис):
+План шоураннера (весь выпуск; тебе нужны формат, часть про эту тему и общий тезис):
 {plan}
 
 Тема фрагмента:
@@ -395,13 +449,13 @@ SEGMENT_PROMPT = """Ты пишешь фрагмент сценария анал
 {body}
 {excerpts}"""
 
-FINAL_SEGMENT_PROMPT = """Ты пишешь финальный фрагмент сценария аналитического подкаста «Что нового в AI» с двумя ведущими.
+FINAL_SEGMENT_PROMPT = """Ты пишешь финальный фрагмент сценария подкаста «Что нового в AI».
 
 {hosts}
 
 Это КОНЕЦ выпуска. Сначала короткий блиц по новостям ниже (одна-две реплики на новость, \
 с оценкой, а не пересказом; неважное можно пропустить; к темам, уже разобранным в выпуске, \
-не возвращаться), затем вывод недели из плана редактора \
+не возвращаться; можно с иронией), затем финал по плану шоураннера: вывод недели, рубрика \
 или открытый вопрос на следующие выпуски — и всё, без долгих прощаний. \
 Весь финал — примерно {words} слов.
 {continuity}
@@ -409,18 +463,17 @@ FINAL_SEGMENT_PROMPT = """Ты пишешь финальный фрагмент 
 - Только живой разговор — никаких списков и буллетов в репликах
 - Формат строго (каждая реплика на новой строке):
 
-АЛЕКС: текст реплики
-САША: текст реплики
+{speakers}
 
-План редактора:
+План шоураннера:
 {plan}
 
 Блиц-новости:
 {korotko}"""
 
 CONDENSE_PROMPT = """Сократи фрагмент диалога подкаста примерно до {words} слов.
-Сохрани формат реплик АЛЕКС:/САША: (каждая на новой строке), самые важные факты, ключевые цифры, \
-оценки и расхождения ведущих.
+Сохрани формат реплик АЛЕКС:/САША:/ГОСТЬ: (каждая на новой строке), самые важные факты, ключевые цифры, \
+оценки, расхождения и лучшие шутки.
 Убирай второстепенные ответвления и повторы, ничего нового не добавляй.
 Первая и последняя реплики должны остаться связующими — фрагмент стоит в середине выпуска.
 
@@ -431,15 +484,16 @@ HUMANIZE_SCRIPT_PROMPT = """{skill}
 
 ---
 
-Режим: Embedded. Ниже — фрагмент сценария подкаста на русском языке, диалог двух ведущих, \
+Режим: Embedded. Ниже — фрагмент сценария подкаста на русском языке, разговор ведущих (иногда с гостем), \
 который будет озвучен синтезом речи. Отредактируй его по правилам скилла выше и по дополнению \
 для русского диалога. Верни только итоговый текст фрагмента, без пояснений, черновиков и списков \
 найденных паттернов.
 
 Жёсткие ограничения:
-- Формат сохраняется: каждая реплика на новой строке и начинается с «АЛЕКС:» или «САША:»
+- Формат сохраняется: каждая реплика на новой строке и начинается с «АЛЕКС:», «САША:» или «ГОСТЬ:»
 - Порядок тем и смысл реплик сохраняются; кто что сказал — тоже. Реплики можно сокращать, \
 объединять соседние реплики одного говорящего, убирать пустые реплики-поддакивания
+- Шутки, подколки, смех и короткие реакции на шутку — не генеративные паттерны, а живость: их не убирать
 - Не добавляй фактов, цифр, имён, дат и ссылок, которых нет в тексте
 - Объём — примерно как в исходнике (±20%)
 
@@ -464,20 +518,20 @@ HUMANIZE_DIGEST_PROMPT = """{skill}
 {text}
 </text>"""
 
-VOICE_DIRECTION_PROMPT = """Ты режиссёр озвучки подкаста. Ниже — фрагмент готового сценария, диалог \
-двух ведущих, который озвучит синтез речи. Расставь в нём редкие актёрские пометки, чтобы разговор \
-звучал живо: ведущие спорят, иронизируют, иногда смеются или хмыкают.
+VOICE_DIRECTION_PROMPT = """Ты режиссёр озвучки подкаста. Ниже — фрагмент готового сценария, разговор \
+ведущих (иногда с гостем, его реплики «ГОСТЬ:»), который озвучит синтез речи. Расставь в нём актёрские \
+пометки, чтобы разговор звучал живо: участники спорят, иронизируют, смеются над шутками друг друга, хмыкают.
 
 Что можно добавлять:
 1. Звуковые теги прямо в текст реплики, латиницей в угловых скобках: {tags}. \
 Другие теги не используй.
 2. Манеру произнесения — 2-4 слова в квадратных скобках сразу после имени: \
-«САША [с усмешкой]: ...», «АЛЕКС [возражая, с напором]: ...». Только там, где интонация заметно \
+«САША [с усмешкой]: ...», «АЛЕКС [возражая, с напором]: ...», «ГОСТЬ [невозмутимо]: ...». Только там, где интонация заметно \
 отличается от обычной спокойной речи.
 
 Мера:
-- Звуковые теги — примерно в одной реплике из пяти; смех и смешок — только там, где в тексте \
-действительно ирония или шутка, не больше двух-трёх на фрагмент.
+- Звуковые теги — примерно в одной реплике из четырёх; смех и смешок — там, где в тексте ирония или \
+шутка: и у того, кто шутит, и у того, кто реагирует.
 - Манера — не больше чем у каждой четвёртой реплики, у остальных скобок нет.
 - Спор должен звучать как спор: возражение — с напором, согласие после спора — неохотно, скепсис — сухо.
 
@@ -1287,17 +1341,58 @@ def generate_digest(context: str, date: str, focus: str | None = None, history: 
     return digest
 
 
-def generate_show_plan(digest: str, history: str = "", focus: str | None = None) -> str:
-    """Stage 1.5: editor's plan — thesis, topic order, where the hosts disagree."""
+def recent_formats(n: int = 3) -> str:
+    """Formats of the last published episodes (header line of their saved plans)."""
+    out = []
+    for stem in published_digest_stems()[:n]:
+        path = DATA_DIR / f"plan_{stem}.md"
+        if path.exists():
+            m = re.search(r"^ФОРМАТ:.*$", path.read_text(encoding="utf-8"), re.MULTILINE)
+            if m:
+                out.append(f"- {stem[:10]}: {m.group(0)}")
+    return "\nФорматы последних выпусков (не повторяй один и тот же подряд без причины):\n" + "\n".join(out) + "\n" \
+        if out else ""
+
+
+def generate_show_plan(digest: str, history: str = "", focus: str | None = None,
+                       fmt: str | None = None) -> str:
+    """Stage 1.5: showrunner — picks a format from the library, writes the plan
+    (thesis, topic order, disagreements, jokes, optional guest)."""
     focus_block = SCRIPT_FOCUS_NOTE.format(focus=focus) if focus else ""
+    if fmt:
+        focus_block += SHOW_FORMAT_OVERRIDE.format(format=fmt)
     history_block = HISTORY_BLOCK.format(history=history) if history else ""
-    print("[LLM] Составляю план выпуска...")
+    topics = "\n".join(f"{i}. {t}" for i, (t, _) in enumerate(split_digest_sections(digest)[0], 1))
+    print("[LLM] Шоураннер выбирает формат и составляет план...")
     plan = call_llm(
-        SHOW_PLAN_PROMPT.format(digest=digest, history=history_block, focus_block=focus_block),
-        temperature=0.5, max_tokens=4096,
+        SHOW_PLAN_PROMPT.format(hosts=HOSTS_BRIEF, formats=FORMATS_PATH.read_text(encoding="utf-8"),
+                                recent_formats=recent_formats(), topics=topics or "(тем нет)",
+                                digest=digest, history=history_block, focus_block=focus_block),
+        temperature=0.7, max_tokens=6144,
     ).strip()
-    print(f"[LLM] План готов: {len(plan)} символов")
+    show = parse_show_header(plan)
+    print(f"[LLM] План готов: {len(plan)} символов, формат: {show['format'] or '?'}, "
+          f"гость: {show['guest'] or 'нет'}")
     return plan
+
+
+def parse_show_header(plan: str) -> dict:
+    """{'format', 'guest' (persona or None), 'guest_topics' (1-based set, None = all)}."""
+    fmt = re.search(r"^\W*ФОРМАТ:\W*([A-Za-z]+)", plan, re.MULTILINE)
+    guest = re.search(r"^\W*ГОСТЬ:\W*(.+)$", plan, re.MULTILINE)
+    topics = re.search(r"^\W*ГОСТЬ В ТЕМАХ:\W*(.+)$", plan, re.MULTILINE)
+    guest = guest.group(1).strip().strip("*").strip() if guest else ""
+    if not guest or guest.lower().startswith("нет"):
+        guest = None
+    guest_topics = None
+    if guest and topics:
+        nums = {int(n) for n in re.findall(r"\d+", topics.group(1))}
+        guest_topics = nums or None
+    return {"format": fmt.group(1).lower() if fmt else None, "guest": guest, "guest_topics": guest_topics}
+
+
+SPEAKERS_HOSTS = "АЛЕКС: текст реплики\nСАША: текст реплики"
+SPEAKERS_WITH_GUEST = SPEAKERS_HOSTS + "\nГОСТЬ: текст реплики"
 
 
 def split_digest_sections(digest: str) -> tuple[list[tuple[str, str]], str]:
@@ -1353,6 +1448,10 @@ def generate_script_chunked(digest: str, minutes: int, plan: str, context: str =
     """Long episodes: one LLM call per digest topic + a finale.
     A single call reliably undershoots length targets past ~12 minutes."""
     topics, korotko = split_digest_sections(digest)
+    show = parse_show_header(plan)
+    guest_in = [bool(show["guest"]) and (show["guest_topics"] is None or i + 1 in show["guest_topics"])
+                for i in range(len(topics))]
+    guest_in_final = bool(show["guest"]) and show["guest_topics"] is None
     target_words = minutes * WORDS_PER_MINUTE
     final_words = FINAL_SEGMENT_WORDS if korotko else 0
     words_per_topic = max(int((target_words - final_words) / max(len(topics), 1)), 250)
@@ -1373,8 +1472,16 @@ def generate_script_chunked(digest: str, minutes: int, plan: str, context: str =
         other_topics = "\n".join(
             f"- {t}{' (уже прошла)' if j < i else ''}" for j, (t, _) in enumerate(topics) if j != i
         ) + ("\n- блиц «Коротко» в финале" if korotko else "")
+        hosts, speakers = HOSTS_BRIEF, SPEAKERS_HOSTS
+        if guest_in[i]:
+            first = not any(guest_in[:i])
+            last = not any(guest_in[i + 1:]) and not (korotko and guest_in_final)
+            pos = {(True, False): "intro", (False, False): "stay",
+                   (True, True): "intro_last", (False, True): "last"}[(first, last)]
+            hosts += GUEST_BRIEF.format(guest=show["guest"], guest_position=GUEST_POSITIONS[pos])
+            speakers = SPEAKERS_WITH_GUEST
         seg = call_llm(
-            SEGMENT_PROMPT.format(hosts=HOSTS_BRIEF, words=words_per_topic, position=position,
+            SEGMENT_PROMPT.format(hosts=hosts, speakers=speakers, words=words_per_topic, position=position,
                                   continuity=continuity, other_topics=other_topics,
                                   plan=plan, title=title, body=body,
                                   excerpts=EXCERPTS_BLOCK.format(excerpts=excerpts) if excerpts else ""),
@@ -1383,12 +1490,16 @@ def generate_script_chunked(digest: str, minutes: int, plan: str, context: str =
         segments.append(seg)
         seg_lines = [l for l in seg.splitlines() if l.strip()]
         tail = "\n".join(seg_lines[-2:])
-        print(f"[LLM]   {i + 1}/{len(topics)} «{title}» — {_word_count(seg)} слов"
+        print(f"[LLM]   {i + 1}/{len(topics)} «{title}» — {_word_count(seg)} слов{', с гостем' if guest_in[i] else ''}"
               f"{f', первоисточники {len(excerpts)} симв.' if excerpts else ''}")
     if korotko:
         continuity = f"\nПоследние реплики перед финалом (не повторять):\n{tail}\n" if tail else ""
+        hosts, speakers = HOSTS_BRIEF, SPEAKERS_HOSTS
+        if guest_in_final:
+            hosts += GUEST_BRIEF.format(guest=show["guest"], guest_position=GUEST_POSITIONS["last"])
+            speakers = SPEAKERS_WITH_GUEST
         final = call_llm(
-            FINAL_SEGMENT_PROMPT.format(hosts=HOSTS_BRIEF, continuity=continuity,
+            FINAL_SEGMENT_PROMPT.format(hosts=hosts, speakers=speakers, continuity=continuity,
                                         plan=plan, korotko=korotko, words=final_words),
             temperature=0.7,
         ).strip()
@@ -1409,7 +1520,7 @@ def generate_script_chunked(digest: str, minutes: int, plan: str, context: str =
                 CONDENSE_PROMPT.format(words=want, segment=seg), temperature=0.4
             ).strip()
             # keep the original if condensing broke the dialogue format
-            if re.search(r"^(АЛЕКС|САША):", condensed, re.MULTILINE):
+            if SPEAKER_LINE.search(condensed):
                 segments[i] = condensed
             print(f"[LLM]   сегмент {i + 1}: {_word_count(seg)} → {_word_count(segments[i])} слов")
 
@@ -1439,9 +1550,14 @@ def generate_script(digest: str, minutes: int | None = None, focus: str | None =
         else "8 самых интересных тем дайджеста"
     )
     focus_block = SCRIPT_FOCUS_NOTE.format(focus=focus) if focus else ""
+    show = parse_show_header(plan)
+    hosts, speakers = HOSTS_BRIEF, SPEAKERS_HOSTS
+    if show["guest"]:
+        hosts += GUEST_BRIEF.format(guest=show["guest"], guest_position=GUEST_POSITIONS["intro"])
+        speakers = SPEAKERS_WITH_GUEST
     print(f"[LLM] Генерирую сценарий из дайджеста ({n_topics} тем → {length_hint})...")
     script = call_llm(
-        SCRIPT_PROMPT.format(hosts=HOSTS_BRIEF, digest=digest, plan=plan, length_hint=length_hint,
+        SCRIPT_PROMPT.format(hosts=hosts, speakers=speakers, digest=digest, plan=plan, length_hint=length_hint,
                              topics_hint=topics_hint, focus_block=focus_block),
         temperature=0.7,
         max_tokens=max(4096, words_hi * 4),
@@ -1452,7 +1568,7 @@ def generate_script(digest: str, minutes: int | None = None, focus: str | None =
 
 # ── Humanizer pass ────────────────────────────────────────────────────────────
 
-SPEAKER_LINE = re.compile(r"^(АЛЕКС|САША):", re.MULTILINE)
+SPEAKER_LINE = re.compile(r"^(АЛЕКС|САША|ГОСТЬ):", re.MULTILINE)
 
 
 def load_humanizer() -> str:
@@ -1535,7 +1651,7 @@ def humanize_digest(digest: str) -> str:
 # ── Voice direction ───────────────────────────────────────────────────────────
 
 VOICE_TAG_RE = re.compile(r"\s*<[a-z -]+>")
-DIRECTED_LINE = re.compile(r"^(АЛЕКС|САША)\s*(?:\[([^\]]*)\])?:\s*(.*)$")
+DIRECTED_LINE = re.compile(r"^(АЛЕКС|САША|ГОСТЬ)\s*(?:\[([^\]]*)\])?:\s*(.*)$")
 
 
 def _plain_line(line: str) -> tuple[str, str] | None:
@@ -1596,7 +1712,7 @@ def parse_script(script: str) -> list[tuple[str, str, str]]:
 
 def tts_chunk(text: str, speaker: str, out_path: Path) -> bool:
     """Run edge-tts for one chunk. Returns True on success."""
-    voice = VOICE_ALEX if speaker == "АЛЕКС" else VOICE_SASHA
+    voice = VOICE_SASHA if speaker == "САША" else VOICE_ALEX
     cmd = [
         EDGE_TTS,
         "--voice", voice,
@@ -1747,7 +1863,8 @@ def build_audio(lines: list[tuple[str, str, str]], output_path: Path) -> int:
 
 def gemini_tts_request(lines: list[tuple[str, str, str]]) -> bytes | None:
     """One multi-speaker Interactions request. Returns raw PCM (s16le, 24kHz, mono).
-    3.8 TTS anchors on the prebuilt voice; no long style prompt (it causes drift)."""
+    3.8 TTS anchors on the prebuilt voice; no long style prompt (it causes drift).
+    The API takes exactly two speakers: a single-speaker run gets a silent partner."""
     import base64
     import io
     import wave
@@ -1758,14 +1875,14 @@ def gemini_tts_request(lines: list[tuple[str, str, str]]) -> bytes | None:
         if manner:
             ann["style"] = manner
         content.append({"type": "text", "text": text, "annotations": [ann]})
+    speakers = list(dict.fromkeys(l[0] for l in lines))
+    speakers += [s for s in GEMINI_VOICES if s not in speakers][:2 - len(speakers)]
     payload = {
         "model": GEMINI_TTS_MODEL,
         "input": [{"type": "user_input", "content": content}],
         "response_format": {"type": "audio"},
         "generation_config": {"speech_config": {"mode": "conversational", "speakers": [
-            {"speaker": "АЛЕКС", "voice": GEMINI_VOICE_ALEX},
-            {"speaker": "САША", "voice": GEMINI_VOICE_SASHA},
-        ]}},
+            {"speaker": s, "voice": GEMINI_VOICES[s]} for s in speakers]}},
     }
     for attempt in range(3):
         try:
@@ -1786,39 +1903,70 @@ def gemini_tts_request(lines: list[tuple[str, str, str]]) -> bytes | None:
     return None
 
 
+def _two_speaker_runs(lines: list[tuple[str, str, str]]) -> list[list[tuple[str, str, str]]]:
+    """Greedy split into consecutive runs with at most two distinct speakers each."""
+    runs: list[list[tuple[str, str, str]]] = []
+    for line in lines:
+        if runs and len({l[0] for l in runs[-1]} | {line[0]}) <= 2:
+            runs[-1].append(line)
+        else:
+            runs.append([line])
+    return runs
+
+
+def _gemini_tts_run(lines: list[tuple[str, str, str]]) -> bytes | None:
+    """One run in one request (a single take keeps voices stable), else in blocks."""
+    pcm = gemini_tts_request(lines)
+    if pcm is not None:
+        return pcm
+    blocks: list[list[tuple[str, str, str]]] = []
+    cur_len = 0
+    for line in lines:
+        if blocks and cur_len + len(line[1]) <= GEMINI_TTS_BLOCK_CHARS:
+            blocks[-1].append(line)
+            cur_len += len(line[1])
+        else:
+            blocks.append([line])
+            cur_len = len(line[1])
+    print(f"[Gemini TTS] одним запросом не вышло — {len(blocks)} блоков")
+    silence = b"\x00" * (int(SILENCE_BETWEEN_SPEAKERS_SEC * GEMINI_TTS_SAMPLE_RATE) * 2)
+    parts = bytearray()
+    for i, block in enumerate(blocks, 1):
+        print(f"  [Gemini TTS {i}/{len(blocks)}] {len(block)} реплик...")
+        audio = gemini_tts_request(block)
+        if audio is None:
+            print(f"[Gemini TTS] блок {i} не озвучился")
+            return None
+        if parts:
+            parts += silence
+        parts += audio
+    return bytes(parts)
+
+
 def build_audio_gemini(lines: list[tuple[str, str, str]], output_path: Path) -> int:
     """
-    Multi-speaker TTS via Gemini API: the whole script in one request (a single
-    take keeps voices stable), falling back to blocks → PCM → CBR 64k MP3.
+    Multi-speaker TTS via Gemini API → PCM → CBR 64k MP3. Without a guest the
+    whole script is one request; with a guest (the API takes two speakers) it
+    goes in runs of at most two speakers.
     Returns duration in seconds (0 on failure — caller falls back to edge-tts).
     """
     EPISODES_DIR.mkdir(parents=True, exist_ok=True)
 
-    print(f"[Gemini TTS] {GEMINI_TTS_MODEL}: {len(lines)} реплик одним запросом...")
-    pcm = gemini_tts_request(lines)
-    if pcm is None:
-        blocks: list[list[tuple[str, str, str]]] = []
-        cur_len = 0
-        for line in lines:
-            if blocks and cur_len + len(line[1]) <= GEMINI_TTS_BLOCK_CHARS:
-                blocks[-1].append(line)
-                cur_len += len(line[1])
-            else:
-                blocks.append([line])
-                cur_len = len(line[1])
-        print(f"[Gemini TTS] одним запросом не вышло — {len(blocks)} блоков")
-        silence = b"\x00" * (int(SILENCE_BETWEEN_SPEAKERS_SEC * GEMINI_TTS_SAMPLE_RATE) * 2)
-        parts = bytearray()
-        for i, block in enumerate(blocks, 1):
-            print(f"  [Gemini TTS {i}/{len(blocks)}] {len(block)} реплик...")
-            audio = gemini_tts_request(block)
-            if audio is None:
-                print(f"[Gemini TTS] блок {i} не озвучился")
-                return 0
-            if parts:
-                parts += silence
-            parts += audio
-        pcm = bytes(parts)
+    runs = _two_speaker_runs(lines)
+    print(f"[Gemini TTS] {GEMINI_TTS_MODEL}: {len(lines)} реплик, запросов: {len(runs)}...")
+    silence = b"\x00" * (int(SILENCE_BETWEEN_SPEAKERS_SEC * GEMINI_TTS_SAMPLE_RATE) * 2)
+    parts = bytearray()
+    for i, run in enumerate(runs, 1):
+        if len(runs) > 1:
+            print(f"  [Gemini TTS run {i}/{len(runs)}] {'+'.join(dict.fromkeys(l[0] for l in run))}: "
+                  f"{len(run)} реплик")
+        audio = _gemini_tts_run(run)
+        if audio is None:
+            return 0
+        if parts:
+            parts += silence
+        parts += audio
+    pcm = bytes(parts)
 
     with tempfile.NamedTemporaryFile(suffix=".pcm", delete=False) as f:
         pcm_path = Path(f.name)
@@ -1867,6 +2015,8 @@ def main():
                         help="Не прогонять дайджест и сценарий через humanizer (для отладки)")
     parser.add_argument("--no-direction", action="store_true",
                         help="Без разметки озвучки (<laugh>, манера реплик)")
+    parser.add_argument("--format", type=str, default=None,
+                        help="Задать формат выпуска вместо выбора шоураннером (id из prompts/formats.md)")
     args = parser.parse_args()
 
     today = datetime.now().strftime("%Y-%m-%d")
@@ -2010,7 +2160,7 @@ def main():
     # 5. Stage 2: editor's plan, then script
     plan = ""
     try:
-        plan = generate_show_plan(digest, history=history, focus=args.focus)
+        plan = generate_show_plan(digest, history=history, focus=args.focus, fmt=args.format)
     except Exception as e:
         print(f"[plan] План не составлен, пишу сценарий без него: {e}")
     script = generate_script(digest, minutes=args.minutes, focus=args.focus, plan=plan,

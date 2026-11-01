@@ -1,0 +1,10 @@
+[Unit]
+Description=Weekly AI podcast: generate episode and publish to RSS
+After=docker.service
+
+[Service]
+Type=oneshot
+# Same container/env as the admin «Generate» button, but without --no-publish.
+# Log goes to the file the admin panel shows.
+ExecStart=/usr/bin/docker exec podcast-admin sh -c 'python -u /opt/data/skills/podcast/podcast_skill.py --days 7 > /opt/data/podcast/logs/generate.log 2>&1'
+TimeoutStartSec=3h

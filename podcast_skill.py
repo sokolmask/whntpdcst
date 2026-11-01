@@ -548,6 +548,18 @@ VOICE_DIRECTION_PROMPT = """Ты режиссёр озвучки подкаст�
 VOICE_TAGS = ("<laugh>", "<chuckle>", "<sigh>", "<breath>", "<short pause>", "<long pause>")
 
 
+EPISODE_SUMMARY_PROMPT = """Напиши анонс выпуска подкаста «Что нового в AI» для описания \
+в подкаст-приложении. Одно-два коротких предложения, не больше 250 символов. Начни со слов \
+«В этом выпуске». Назови две-три главные темы конкретно (компании, продукты, события) — по плану и \
+дайджесту ниже. Без восклицаний, рекламных слов, кавычек и эмодзи. Ответь только текстом анонса.
+
+План выпуска:
+{plan}
+
+Дайджест:
+{digest}
+"""
+
 TRANSLATE_DIGEST_PROMPT = """Translate this Russian Markdown digest of AI news into English.
 Keep the Markdown structure, headings, links and facts exactly as they are.
 Write natural tech-journalism English. Leave product/company names as is.
@@ -1881,7 +1893,7 @@ def gemini_tts_request(lines: list[tuple[str, str, str]]) -> bytes | None:
         "model": GEMINI_TTS_MODEL,
         "input": [{"type": "user_input", "content": content}],
         "response_format": {"type": "audio"},
-        "generation_config": {"speech_config": {"mode": "conversational", "speakers": [
+        "generation_config": {"speech_config": {"speakers": [
             {"speaker": s, "voice": GEMINI_VOICES[s]} for s in speakers]}},
     }
     for attempt in range(3):
@@ -1899,6 +1911,8 @@ def gemini_tts_request(lines: list[tuple[str, str, str]]) -> bytes | None:
                 return w.readframes(w.getnframes())
         except Exception as e:
             print(f"  [Gemini TTS] попытка {attempt + 1}: {e}")
+            if isinstance(e, httpx.HTTPStatusError):
+                print(f"  [Gemini TTS] ответ API: {e.response.text[:1000]}")
             time.sleep(5)
     return None
 
@@ -1994,6 +2008,25 @@ def build_audio_gemini(lines: list[tuple[str, str, str]], output_path: Path) -> 
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
+
+def episode_summary(digest: str, plan: str) -> str:
+    """One-two sentence teaser for the feed description; empty string on failure."""
+    body = re.split(r"^##\s+Источники выпуска", digest, flags=re.MULTILINE)[0]
+    try:
+        text = call_llm(
+            EPISODE_SUMMARY_PROMPT.format(plan=plan[:4000] or "(нет)", digest=body[:10000]),
+            temperature=0.4, max_tokens=400,
+        )
+    except Exception as e:
+        print(f"[summary] Анонс не сгенерирован: {e}")
+        return ""
+    text = " ".join(text.split()).strip().strip('"«»')
+    if not text.startswith("В этом выпуске") or len(text) > 400:
+        print(f"[summary] Анонс отброшен: {text[:200]}")
+        return ""
+    print(f"[summary] {text}")
+    return text
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -2237,9 +2270,12 @@ def main():
         sources_line = ", ".join(summary) + " и другие — полный список в текстовом дайджесте"
     else:
         sources_line = ", ".join(sources) if sources else "YouTube, HackerNews, HuggingFace Papers"
-    description = (
+    teaser = episode_summary(digest, plan) or (
         f"Еженедельный обзор AI-новостей — неделя от {today}: ключевые события "
-        f"и что они значат на практике.\n"
+        f"и что они значат на практике."
+    )
+    description = (
+        f"{teaser}\n"
         f"\n"
         f"Текстовый дайджест выпуска:\n"
         f"{digest_links}\n"

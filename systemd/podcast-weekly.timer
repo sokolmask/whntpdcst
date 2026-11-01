@@ -1,0 +1,11 @@
+[Unit]
+Description=Weekly AI podcast on Saturday 20:00 Israel time
+
+[Timer]
+OnCalendar=Sat *-*-* 20:00:00 Asia/Jerusalem
+Persistent=true
+AccuracySec=1min
+Unit=podcast-weekly.service
+
+[Install]
+WantedBy=timers.target

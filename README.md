@@ -146,6 +146,25 @@ docker/            # nginx static server (8085) + админка (8086)
 setup-carbon.sh    # one-time setup на сервере
 ```
 
+## Расписание
+
+Выпуск собирается и сразу публикуется в RSS каждую **субботу в 20:00 по Израилю** —
+systemd user-таймер на carbon (`systemd/podcast-weekly.{service,timer}`). Запуск идёт
+в контейнере `podcast-admin`, лог — тот же `logs/generate.log`, что показывает админка.
+Если carbon был выключен, таймер догонит пропуск при загрузке (`Persistent=true`).
+
+```bash
+# установка / обновление после изменения юнитов
+cp systemd/podcast-weekly.* ~/.config/systemd/user/
+systemctl --user daemon-reload && systemctl --user enable --now podcast-weekly.timer
+systemctl --user list-timers podcast-weekly.timer   # когда следующий запуск
+systemctl --user start podcast-weekly.service       # прогнать вручную
+```
+
+Номер выпуска — следующий после максимального «Выпуск N» в названиях фида;
+`itunes:episode` всегда равен номеру из названия (и при правке названия в админке).
+Первая строка описания — короткий LLM-анонс «В этом выпуске…» по плану и дайджесту.
+
 ## Админка
 
 `https://admin.whntpdcst.com` (через Cloudflare Tunnel) или `http://carbon:8086` в LAN.

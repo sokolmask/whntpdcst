@@ -6,6 +6,7 @@ Feed location: /opt/data/podcast/feed.xml
 """
 
 import os
+import re
 from datetime import datetime, timezone
 from email.utils import formatdate
 from pathlib import Path
@@ -98,6 +99,8 @@ def _prettify(rss: ET.Element) -> str:
     # remove the minidom-generated declaration if present
     if lines and lines[0].startswith("<?xml"):
         lines = lines[1:]
+    # re-prettifying an already indented feed adds whitespace-only lines
+    lines = [ln for ln in lines if ln.strip()]
     return '<?xml version="1.0" encoding="UTF-8"?>\n' + "\n".join(lines) + "\n"
 
 
@@ -148,6 +151,14 @@ def _sync_channel_meta(channel: ET.Element) -> None:
         set_text(owner, f"{it}name", FEED_META["author"])
 
 
+TITLE_NUM_RE = re.compile(r"Выпуск\s+(\d+)")
+
+
+def episode_number_from_title(title: str) -> int | None:
+    m = TITLE_NUM_RE.search(title or "")
+    return int(m.group(1)) if m else None
+
+
 def _get_existing_items(channel: ET.Element) -> list[ET.Element]:
     return channel.findall("item")
 
@@ -174,6 +185,8 @@ def add_episode(
         duration_seconds: Audio duration in whole seconds
         episode_number:   Sequential episode number (used in guid/url)
     """
+    # The number in the title is what listeners see — keep itunes:episode in sync with it
+    episode_number = episode_number_from_title(title) or episode_number
     mp3_path = Path(mp3_path)
     mp3_filename = mp3_path.name
     mp3_url = f"{BASE_URL}/episodes/{mp3_filename}"
@@ -235,23 +248,17 @@ def add_episode(
 
 
 def get_next_episode_number() -> int:
-    """Return the next episode number based on existing feed items."""
+    """Next episode number: max «Выпуск N» in feed titles + 1 (falls back to itunes:episode)."""
     if not FEED_PATH.exists():
         return 1
     try:
-        rss = ET.parse(str(FEED_PATH)).getroot()
-        channel = rss.find("channel")
-        if channel is None:
-            return 1
-        items = channel.findall("item")
-        if not items:
-            return 1
-        # Try to parse itunes:episode from the most recent item
-        ns = "http://www.itunes.com/dtds/podcast-1.0.dtd"
-        ep_el = items[0].find(f"{{{ns}}}episode")
-        if ep_el is not None and ep_el.text:
-            return int(ep_el.text) + 1
-        return len(items) + 1
+        channel = ET.parse(str(FEED_PATH)).getroot().find("channel")
+        items = channel.findall("item") if channel is not None else []
+        nums = [n for it in items if (n := episode_number_from_title(it.findtext("title")))]
+        if not nums:
+            nums = [int(t) for it in items
+                    if (t := it.findtext(f"{{{ITUNES_NS}}}episode") or "").isdigit()]
+        return max(nums, default=0) + 1
     except Exception:
         return 1
 

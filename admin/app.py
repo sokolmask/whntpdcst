@@ -561,6 +561,10 @@ def edit(url: str = Form(...), title: str = Form(...), description: str = Form(.
         el = item.find(tag)
         if el is not None:
             el.text = value
+    num = rm.episode_number_from_title(title)
+    ep_el = item.find(ITUNES + "episode")
+    if num and ep_el is not None:
+        ep_el.text = str(num)
     _save_feed(rss)
     return _redirect(f"Обновлено: {title}, {_rebuild_site()}")
 

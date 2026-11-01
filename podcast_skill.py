@@ -549,15 +549,21 @@ VOICE_TAGS = ("<laugh>", "<chuckle>", "<sigh>", "<breath>", "<short pause>", "<l
 
 
 EPISODE_SUMMARY_PROMPT = """Напиши анонс выпуска подкаста «Что нового в AI» для описания \
-в подкаст-приложении. Одно-два коротких предложения, не больше 250 символов. Начни со слов \
-«В этом выпуске». Назови две-три главные темы конкретно (компании, продукты, события) — по плану и \
-дайджесту ниже. Без восклицаний, рекламных слов, кавычек и эмодзи. Ответь только текстом анонса.
+в подкаст-приложении — 3-4 коротких пункта-хука о том, что будет В САМОМ РАЗГОВОРЕ ведущих (сценарий ниже), \
+чтобы захотелось послушать.
 
-План выпуска:
-{plan}
+Каждый пункт — с новой строки, начинается с «* », затем глагол в первом лице множественного числа со \
+строчной буквы и тема: до 60 символов, без точки в конце. Пример стиля:
+* выясняем экономику пузырей
+* смотрим на пред-IPO Anthropic
+* продолжаем следить за тем, как агенты ломают интернет
 
-Дайджест:
-{digest}
+Бери главные темы и повороты разговора, а не все новости подряд. Конкретика (компании, продукты) — да; \
+цифры, восклицания, кликбейт и эмодзи — нет. «Продолжаем следить» — только если ведущие сами говорят, \
+что тема тянется из прошлых выпусков. Ответь только пунктами.
+
+Сценарий выпуска:
+{script}
 """
 
 TRANSLATE_DIGEST_PROMPT = """Translate this Russian Markdown digest of AI news into English.
@@ -2009,23 +2015,23 @@ def build_audio_gemini(lines: list[tuple[str, str, str]], output_path: Path) -> 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-def episode_summary(digest: str, plan: str) -> str:
-    """One-two sentence teaser for the feed description; empty string on failure."""
-    body = re.split(r"^##\s+Источники выпуска", digest, flags=re.MULTILINE)[0]
+def episode_summary(script: str) -> str:
+    """3-4 hook bullets about the episode's conversation for the feed description; '' on failure."""
+    plain = re.sub(r"<[^>]+>|\[[^\]]*\]", "", script)  # drop voice-direction tags and manner
     try:
-        text = call_llm(
-            EPISODE_SUMMARY_PROMPT.format(plan=plan[:4000] or "(нет)", digest=body[:10000]),
-            temperature=0.4, max_tokens=400,
-        )
+        text = call_llm(EPISODE_SUMMARY_PROMPT.format(script=plain[:60000]),
+                        temperature=0.5, max_tokens=400)
     except Exception as e:
         print(f"[summary] Анонс не сгенерирован: {e}")
         return ""
-    text = " ".join(text.split()).strip().strip('"«»')
-    if not text.startswith("В этом выпуске") or len(text) > 400:
-        print(f"[summary] Анонс отброшен: {text[:200]}")
+    bullets = [re.sub(r"^[*•\-–—]\s*", "", ln).strip().rstrip(".")
+               for ln in text.splitlines() if re.match(r"^\s*[*•\-–—]\s+\S", ln)]
+    if not 2 <= len(bullets) <= 5 or any(len(b) > 90 for b in bullets):
+        print(f"[summary] Анонс отброшен: {text[:300]}")
         return ""
-    print(f"[summary] {text}")
-    return text
+    teaser = "\n".join(f"• {b}" for b in bullets)
+    print(f"[summary]\n{teaser}")
+    return teaser
 
 
 def main():
@@ -2270,7 +2276,7 @@ def main():
         sources_line = ", ".join(summary) + " и другие — полный список в текстовом дайджесте"
     else:
         sources_line = ", ".join(sources) if sources else "YouTube, HackerNews, HuggingFace Papers"
-    teaser = episode_summary(digest, plan) or (
+    teaser = episode_summary(script) or (
         f"Еженедельный обзор AI-новостей — неделя от {today}: ключевые события "
         f"и что они значат на практике."
     )

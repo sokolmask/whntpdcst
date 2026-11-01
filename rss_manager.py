@@ -91,6 +91,12 @@ def _make_empty_feed() -> ET.Element:
 
 def _prettify(rss: ET.Element) -> str:
     """Return a pretty-printed XML string."""
+    # drop old indentation so re-prettifying doesn't stack blank lines (text content is kept)
+    for el in rss.iter():
+        if el.text is not None and not el.text.strip():
+            el.text = None
+        if el.tail is not None and not el.tail.strip():
+            el.tail = None
     raw = ET.tostring(rss, encoding="unicode", xml_declaration=False)
     dom = minidom.parseString(raw)
     pretty = dom.toprettyxml(indent="  ", encoding=None)
@@ -99,8 +105,6 @@ def _prettify(rss: ET.Element) -> str:
     # remove the minidom-generated declaration if present
     if lines and lines[0].startswith("<?xml"):
         lines = lines[1:]
-    # re-prettifying an already indented feed adds whitespace-only lines
-    lines = [ln for ln in lines if ln.strip()]
     return '<?xml version="1.0" encoding="UTF-8"?>\n' + "\n".join(lines) + "\n"
 
 
